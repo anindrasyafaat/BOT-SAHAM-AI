@@ -22,6 +22,23 @@ def test_lokal_peringkat_dan_nama_plugin():
         assert cs.skor(tugas, "trading:tulis-email", semua["trading:tulis-email"][0]) == 0
 
 
+def test_pengalaman_dan_evolusi():
+    m = {"riwayat": [
+            {"skill": "a:chart", "tugas": "analisa chart saham", "hasil": "berhasil"},
+            {"skill": "b:jelek", "tugas": "analisa chart saham", "hasil": "gagal"},
+            {"skill": "b:jelek", "tugas": "analisa chart emas", "hasil": "gagal"},
+            {"skill": "b:jelek", "tugas": "analisa chart btc", "hasil": "gagal"}],
+         "celah": [{"tugas": "optimasi query postgres"}, {"tugas": "query postgres lambat optimasi"},
+                   {"tugas": "desain logo"}], "github": {}}
+    exp = cs.pengalaman(m, "tolong analisa chart saham BBCA")
+    assert exp["a:chart"] > 0 > exp["b:jelek"] >= -0.3
+    assert "a:chart" not in cs.pengalaman(m, "desain logo")
+    usulan, lemah, _ = cs.analisis_evolusi(m)
+    assert [u["jumlah"] for u in usulan] == [2] and usulan[0]["nama"] == "optimasi-query-postgres"
+    assert [w["skill"] for w in lemah] == ["b:jelek"]
+
+
 if __name__ == "__main__":
     test_lokal_peringkat_dan_nama_plugin()
+    test_pengalaman_dan_evolusi()
     print("ok")

@@ -1,7 +1,7 @@
 {
   "name": "pengelola-skill",
-  "version": "0.1.0",
-  "description": "Manajer skill: mencocokkan pekerjaan dengan skill terpasang yang paling relevan dan kuat, lalu mencari rekomendasi skill di GitHub (diurutkan berdasarkan bintang) bila belum ada skill yang cocok.",
+  "version": "0.2.0",
+  "description": "Manajer skill yang belajar sendiri: mencocokkan pekerjaan dengan skill terpasang yang paling relevan dan kuat, lalu mencari rekomendasi skill di GitHub (diurutkan berdasarkan bintang) bila belum ada skill yang cocok, mencatat hasil pemakaian untuk memperbaiki peringkat, mengusulkan skill baru dari kebutuhan berulang, dan membuat dashboard HTML.",
   "author": {
     "name": "Muhammad Anindra Syafa'at"
   },

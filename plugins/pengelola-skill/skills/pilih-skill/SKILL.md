@@ -1,6 +1,6 @@
 ---
 name: pilih-skill
-description: "Manajer skill: menentukan skill mana yang paling cocok dan paling kuat untuk sebuah pekerjaan, dan jika belum ada skill yang cocok, mencarikan rekomendasi skill terbaik di GitHub berdasarkan jumlah bintang. Gunakan saat pengguna berkata \"skill apa yang cocok\", \"pakai skill apa\", \"pilihkan skill\", \"rekomendasi skill\", \"cari skill di github\", \"ada skill untuk ...?\", atau sebelum mengerjakan tugas besar yang belum jelas skill-nya."
+description: "Manajer skill yang belajar sendiri: menentukan skill mana yang paling cocok dan paling kuat untuk sebuah pekerjaan (dengan memperhitungkan pengalaman berhasil/gagal sebelumnya), mencarikan rekomendasi skill terbaik di GitHub berdasarkan jumlah bintang bila belum ada, dan mengusulkan skill baru dari kebutuhan yang berulang. Gunakan saat pengguna berkata \"skill apa yang cocok\", \"pakai skill apa\", \"pilihkan skill\", \"rekomendasi skill\", \"cari skill di github\", \"ada skill untuk ...?\", \"dashboard skill\", \"evolusi skill\", atau sebelum mengerjakan tugas besar yang belum jelas skill-nya."
 ---
 
 # Pilih Skill
@@ -48,6 +48,26 @@ Skrip: `${CLAUDE_PLUGIN_ROOT}/skills/pilih-skill/scripts/cari_skill.py` (hanya p
    Periksa struktur repo dulu (README / daftar file) sebelum menyebut cara pasang.
 
 6. **Peringatan wajib** saat merekomendasikan repo GitHub: bintang ≠ aman. Sarankan membaca `SKILL.md` dan skrip di dalamnya sebelum memasang, utamakan repo yang aktif (update < 6 bulan) dan berlisensi jelas. Jangan memasang apa pun tanpa persetujuan pengguna.
+
+7. **Belajar dari hasil (wajib setelah skill dipakai).** Setelah pekerjaan selesai, nilai jujur apakah skill pilihan benar-benar membantu, lalu catat:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/pilih-skill/scripts/cari_skill.py" catat <plugin:skill> "<tugas>" --hasil berhasil|gagal --catatan "<alasan singkat>"
+   ```
+   Catatan ini menggeser peringkat berikutnya untuk tugas mirip (maks ±0.3): skill yang terbukti naik, yang gagal turun. Skill bawaan yang tidak ada di disk tetap muncul lewat baris `[pengalaman +x]`. Pemindaian `lokal` yang tidak menemukan apa pun otomatis dicatat sebagai **celah**.
+
+8. **Evolusi (kembangkan kemampuan sendiri).** Jalankan saat memulai sesi besar, atau bila pengguna meminta:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/pilih-skill/scripts/cari_skill.py" evolusi
+   ```
+   - `USULAN_SKILL_BARU` = kebutuhan yang ≥2 kali muncul tanpa skill. Tawarkan ke pengguna: cari dulu di GitHub (langkah 5); jika tidak ada yang layak, buat skill baru di `~/.claude/skills/<nama>/SKILL.md` dengan skill `skill-creator` (bila tersedia) dari pengetahuan yang terbukti berhasil di sesi ini. Setelah dibuat, `catat` pemakaian pertamanya agar celah tertutup.
+   - `SKILL_LEMAH` = skill yang lebih sering gagal. Usulkan pengganti atau perbaikan.
+   Jangan membuat atau memasang skill tanpa persetujuan pengguna.
+
+9. **Dashboard.** Untuk gambaran lengkap (katalog, uji pekerjaan interaktif, papan pengalaman, usulan evolusi, cache rekomendasi GitHub):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/pilih-skill/scripts/cari_skill.py" dashboard
+   ```
+   Hasilnya `~/.claude/pengelola-skill/dashboard.html`; buka di browser atau kirim ke pengguna.
 
 ## Catatan
 
