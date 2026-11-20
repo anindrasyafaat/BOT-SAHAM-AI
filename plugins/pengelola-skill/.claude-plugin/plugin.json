@@ -1,0 +1,9 @@
+{
+  "name": "pengelola-skill",
+  "version": "0.1.0",
+  "description": "Manajer skill: mencocokkan pekerjaan dengan skill terpasang yang paling relevan dan kuat, lalu mencari rekomendasi skill di GitHub (diurutkan berdasarkan bintang) bila belum ada skill yang cocok.",
+  "author": {
+    "name": "Muhammad Anindra Syafa'at"
+  },
+  "keywords": ["skill", "manajer skill", "rekomendasi", "github", "stars", "plugin"]
+}
