@@ -398,11 +398,52 @@ def fear_greed(quotes: dict, history: dict) -> Optional[dict]:
             "symbols": n_hist, "timestamp": datetime.now().isoformat()}
 
 
+CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"  # Forex Factory: gratis, tanpa API key
+_calendar_cache: dict = {"at": None, "events": []}
+
+
+def calendar_events(raw: list, now: datetime, past: bool = False) -> list:
+    """Event berdampak Medium/High (plus semua event IDR), waktu WIB. past=True: event yang sudah lewat."""
+    from zoneinfo import ZoneInfo
+    wib = ZoneInfo("Asia/Jakarta")
+    out = []
+    for e in raw:
+        try:
+            when = datetime.fromisoformat(e["date"]).astimezone(wib)
+        except (KeyError, ValueError):
+            continue
+        if (when < now.astimezone(wib)) != past or (e.get("impact") not in ("High", "Medium") and e.get("country") != "IDR"):
+            continue
+        out.append({
+            "date": when.date().isoformat(), "time": when.strftime("%d %b %H:%M WIB") + (" (lewat)" if past else ""),
+            "currency": e.get("country", ""), "event": e.get("title", ""), "impact": e.get("impact", "Low"),
+            "actual": "", "forecast": e.get("forecast", ""), "previous": e.get("previous", ""),
+        })
+    return sorted(out, key=lambda x: (x["date"], x["time"]), reverse=past)
+
+
 @router.get("/economic-calendar")
-async def get_economic_calendar():
-    """Belum ada sumber kalender ekonomi gratis yang terhubung; kembalikan kosong, bukan data karangan."""
-    return {"status": "success", "data": [], "source": None,
-            "message": "Kalender ekonomi belum terhubung ke sumber data"}
+async def get_economic_calendar(limit: int = Query(15, ge=1, le=100)):
+    """Kalender ekonomi minggu ini dari Forex Factory (di-cache 1 jam agar sopan terhadap sumber)."""
+    import httpx
+    now = datetime.now().astimezone()
+    if _calendar_cache["at"] is None or (now - _calendar_cache["at"]).total_seconds() > 3600:
+        try:
+            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "TradingCommandCenter/1.0"}) as c:
+                r = await c.get(CALENDAR_URL)
+                r.raise_for_status()
+                _calendar_cache.update(at=now, events=r.json())
+        except Exception as e:
+            logger.warning(f"⚠️ Kalender ekonomi tidak bisa diambil: {e}")
+            if not _calendar_cache["events"]:
+                return {"status": "success", "data": [], "source": None, "message": "Sumber kalender sedang tidak bisa diakses"}
+    data = calendar_events(_calendar_cache["events"], now)[:limit]
+    if data:
+        return {"status": "success", "data": data, "source": "Forex Factory", "total_events": len(data)}
+    # akhir pekan: jadwal minggu depan baru terbit; tampilkan event penting minggu ini yang sudah lewat
+    data = calendar_events(_calendar_cache["events"], now, past=True)[:limit]
+    return {"status": "success", "data": data, "source": "Forex Factory", "total_events": len(data),
+            "message": "Belum ada jadwal mendatang; menampilkan event minggu ini yang sudah lewat"}
 
 
 @router.get("/fear-greed-index")

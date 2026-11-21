@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     
     # Environment
     environment: str = Field(default="development")
-    debug: bool = Field(default=True)
+    debug: bool = Field(default=False)  # True membuka pesan error ke klien
     
     # Server Configuration
     host: str = Field(default="0.0.0.0")
@@ -23,14 +23,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = Field(default="sqlite:///data/trading.db")
     
-    # Redis Cache
-    redis_url: str = Field(default="redis://localhost:6379")
-    redis_ttl: int = Field(default=300)  # 5 menit
-    
     # API Keys untuk Market Data
-    alpha_vantage_api_key: Optional[str] = Field(default=None)
-    finnhub_api_key: Optional[str] = Field(default=None)
-    news_api_key: Optional[str] = Field(default=None)
     
     # Notification Channels
     telegram_bot_token: Optional[str] = Field(default=None)
@@ -38,7 +31,6 @@ class Settings(BaseSettings):
     discord_webhook_url: Optional[str] = Field(default=None)
     
     # Trading Parameters
-    paper_trading_enabled: bool = Field(default=True)
     max_positions: int = Field(default=10)
     risk_per_trade: float = Field(default=0.02)  # 2%
     initial_capital: float = Field(default=100_000_000)  # IDR, modal paper trading
@@ -46,16 +38,11 @@ class Settings(BaseSettings):
     sell_fee: float = Field(default=0.0025)  # 0.25% termasuk PPh final 0.1%
     
     # Market Data Configuration
-    update_interval: int = Field(default=10)  # 10 detik
-    websocket_reconnect_interval: int = Field(default=5)
+    update_interval: int = Field(default=60)  # detik
     
     # Signal Generation
     min_confidence_score: float = Field(default=70.0)
     signal_expiry_hours: int = Field(default=24)
-    
-    # Risk Management
-    max_daily_loss: float = Field(default=0.05)  # 5%
-    stop_loss_multiplier: float = Field(default=2.0)
     
     # Supported Markets
     indonesia_stocks: List[str] = Field(default=[
@@ -105,30 +92,10 @@ def get_database_url() -> str:
     return settings.database_url
 
 
-def get_redis_url() -> str:
-    """Mendapatkan URL Redis"""
-    return settings.redis_url
-
-
-def is_production() -> bool:
-    """Cek apakah environment adalah production"""
-    return settings.environment == "production"
-
-
 def get_supported_symbols() -> dict:
     """Mendapatkan semua symbol yang didukung"""
     return {
         "indonesia": settings.indonesia_stocks,
         "us": settings.us_stocks,
         "crypto": settings.crypto_symbols
-    }
-
-
-def get_risk_parameters() -> dict:
-    """Mendapatkan parameter risk management"""
-    return {
-        "max_positions": settings.max_positions,
-        "risk_per_trade": settings.risk_per_trade,
-        "max_daily_loss": settings.max_daily_loss,
-        "stop_loss_multiplier": settings.stop_loss_multiplier
     }

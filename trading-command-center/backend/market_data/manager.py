@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import math
 import pandas as pd
+import httpx
 import yfinance as yf
 from database.connection import AsyncSessionLocal
 from models.market_data import MarketData, MarketSummary, SectorPerformance
@@ -18,7 +19,37 @@ logger = setup_logging()
 
 HISTORY_PERIOD = "1y"          # cukup untuk EMA/MACD/BB/SMA200 harian
 FUNDAMENTAL_REFRESH = 6 * 3600
-FX_SYMBOL = "USDIDR=X"  # ticker.info lambat & dibatasi rate, cukup beberapa kali sehari
+FX_SYMBOL = "USDIDR=X"
+COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"  # gratis, tanpa API key
+COINGECKO_IDS = {
+    "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "ADAUSDT": "cardano", "SOLUSDT": "solana",
+    "DOTUSDT": "polkadot", "LINKUSDT": "chainlink", "POLUSDT": "polygon-ecosystem-token",
+    "AVAXUSDT": "avalanche-2", "ATOMUSDT": "cosmos", "XLMUSDT": "stellar", "VETUSDT": "vechain",
+    "FILUSDT": "filecoin", "TRXUSDT": "tron", "ETCUSDT": "ethereum-classic", "XRPUSDT": "ripple",
+    "BCHUSDT": "bitcoin-cash", "LTCUSDT": "litecoin", "BNBUSDT": "binancecoin", "DOGEUSDT": "dogecoin",
+    "SHIBUSDT": "shiba-inu", "SANDUSDT": "the-sandbox", "MANAUSDT": "decentraland", "AXSUSDT": "axie-infinity",
+}
+
+
+def coingecko_quote(symbol: str, cg: dict, previous: Optional[dict]) -> Optional[dict]:
+    """Kutipan cadangan dari CoinGecko; candle/fundamental lama dipertahankan dari `previous`."""
+    price, chg = _num(cg.get("usd")), _num(cg.get("usd_24h_change"))
+    if not price:
+        return None
+    prev_close = price / (1 + chg / 100) if chg is not None else (previous or {}).get("close_price", price)
+    base = dict(previous or {})
+    base.update({
+        "symbol": symbol, "name": base.get("name") or symbol, "current_price": price,
+        "open_price": base.get("open_price", prev_close), "high_price": max(base.get("high_price", price), price),
+        "low_price": min(base.get("low_price", price), price), "close_price": prev_close,
+        "volume": _num(cg.get("usd_24h_vol")) or 0.0, "change_amount": price - prev_close,
+        "change_percent": (price / prev_close - 1) * 100 if prev_close else 0.0,
+        "market_type": "crypto", "exchange": "CoinGecko", "currency": "USD", "timestamp": datetime.now(),
+    })
+    for k in ("volume_avg", "market_cap", "pe_ratio", "pb_ratio", "dividend_yield", "day_high", "day_low",
+              "fifty_two_week_high", "fifty_two_week_low"):
+        base.setdefault(k, None)
+    return base  # ticker.info lambat & dibatasi rate, cukup beberapa kali sehari
 
 
 def yahoo_symbol(symbol: str) -> str:
@@ -99,15 +130,40 @@ class MarketDataManager:
             logger.warning("⚠️ Kurs USD/IDR tidak tersedia; nilai aset USD belum dikonversi")
         return frames
 
+    def _coingecko(self, symbols: List[str]) -> Dict[str, dict]:
+        ids = {COINGECKO_IDS[s]: s for s in symbols if s in COINGECKO_IDS}
+        if not ids:
+            return {}
+        r = httpx.get(COINGECKO_URL, timeout=15, params={
+            "ids": ",".join(ids), "vs_currencies": "usd", "include_24hr_change": "true", "include_24hr_vol": "true"})
+        r.raise_for_status()
+        return {ids[i]: v for i, v in r.json().items() if i in ids}
+
     async def refresh(self):
-        """Ambil candle terbaru semua simbol lalu perbarui cache, DB, dan WebSocket."""
-        frames = await asyncio.to_thread(self._download)
-        if not frames:
-            raise RuntimeError("Yahoo Finance tidak mengembalikan data (cek koneksi/ rate limit)")
-        rows = []
+        """Ambil candle terbaru semua simbol lalu perbarui cache, DB, dan WebSocket.
+        Yahoo utama; kripto yang gagal dari Yahoo diambil dari CoinGecko; saham yang gagal memakai cache terakhir."""
+        try:
+            frames = await asyncio.to_thread(self._download)
+        except Exception as e:
+            logger.warning(f"⚠️ Yahoo Finance gagal: {e}")
+            frames = {}
+        quotes = {}
         for symbol, df in frames.items():
             self.history[symbol] = df
-            data = self._quote(symbol, df)
+            quotes[symbol] = self._quote(symbol, df)
+        missing = [s for s in self.symbols.get("crypto", []) if s not in frames]
+        if missing:
+            try:
+                for sym, cg in (await asyncio.to_thread(self._coingecko, missing)).items():
+                    q = coingecko_quote(sym, cg, self.market_data_cache.get(sym))
+                    if q:
+                        quotes[sym] = q
+            except Exception as e:
+                logger.warning(f"⚠️ CoinGecko cadangan gagal: {e}")
+        if not quotes:
+            raise RuntimeError("Yahoo Finance & CoinGecko tidak mengembalikan data (cek koneksi/ rate limit)")
+        rows = []
+        for symbol, data in quotes.items():
             self.market_data_cache[symbol] = data
             rows.append(data)
             await self.websocket_manager.broadcast(
@@ -119,7 +175,8 @@ class MarketDataManager:
         from paper.broker import check_exits
         await check_exits(self)
         self.last_refresh, self.last_error = datetime.now(), None
-        logger.info(f"📈 Market data refreshed: {len(frames)}/{len(self.market_type_of)} symbols")
+        logger.info(f"📈 Market data refreshed: {len(frames)} Yahoo + {len(quotes) - len(frames)} CoinGecko"
+                    f" / {len(self.market_type_of)} symbols")
 
     def _quote(self, symbol: str, df: pd.DataFrame) -> dict:
         last, prev = df.iloc[-1], df.iloc[-2]

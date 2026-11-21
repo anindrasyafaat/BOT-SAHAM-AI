@@ -56,7 +56,8 @@ class SignalGenerator:
         self.signal_cache: Dict[str, dict] = {}
         
         # Parameters
-        self.parameters = SignalParameters()
+        self.parameters = SignalParameters(min_confidence=settings.min_confidence_score,
+                                           signal_expiry_hours=settings.signal_expiry_hours)
         self.symbols = get_supported_symbols()
         
         # Rate limiting

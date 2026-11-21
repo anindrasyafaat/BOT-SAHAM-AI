@@ -12,7 +12,7 @@ from news_sentiment.analyzer import MARKET_QUERIES, SentimentAnalyzer
 
 router = APIRouter()
 analyzer = SentimentAnalyzer()
-CATEGORY = {"stock market": "Pasar Global", "Indonesia stocks": "Pasar Indonesia", "bitcoin crypto": "Kripto"}
+CATEGORY = {"stock market": "Pasar Global", "IHSG saham": "Pasar Indonesia", "bitcoin crypto": "Kripto"}
 
 
 def _with_category(items):

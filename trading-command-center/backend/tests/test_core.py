@@ -73,3 +73,31 @@ def test_price_alert_and_placeholders():
     assert not hit({"alert_type": "below", "target_price": 100}, {"current_price": 101})
     assert hit({"alert_type": "percent_change", "percent_change": 3}, {"current_price": 1, "change_percent": -3.5})
     assert not configured("your_telegram_bot_token_here") and configured("123:abc") and not configured(None)
+
+
+def test_free_source_parsers():
+    from market_data.manager import coingecko_quote
+    from news_sentiment.analyzer import parse_google_rss, use_google_news
+    from routes.market_data import calendar_events
+
+    now = datetime.fromisoformat("2026-11-20T10:00:00+00:00")
+    raw = [
+        {"title": "CPI m/m", "country": "USD", "date": "2026-11-20T08:30:00-05:00", "impact": "High", "forecast": "0.3%", "previous": "0.4%"},
+        {"title": "Old", "country": "USD", "date": "2026-11-19T08:30:00-05:00", "impact": "High"},       # sudah lewat
+        {"title": "Minor", "country": "JPY", "date": "2026-11-21T08:30:00-05:00", "impact": "Low"},      # dampak rendah
+        {"title": "BI Rate", "country": "IDR", "date": "2026-11-21T07:30:00+00:00", "impact": "Low"},    # IDR selalu ikut
+    ]
+    ev = calendar_events(raw, now)
+    assert [e["event"] for e in ev] == ["CPI m/m", "BI Rate"] and ev[0]["time"] == "20 Nov 20:30 WIB"
+    past = calendar_events(raw, now, past=True)
+    assert [e["event"] for e in past] == ["Old"] and past[0]["time"].endswith("(lewat)")
+
+    rss = ("<rss><channel><item><title>IHSG Anjlok 3% - Kontan</title><link>https://n/1</link><guid>g1</guid>"
+           "<pubDate>Fri, 21 Nov 2026 01:10:00 GMT</pubDate><source url='x'>Kontan</source></item></channel></rss>")
+    item = parse_google_rss(rss, "IHSG saham", [], 5)[0]
+    assert item["title"] == "IHSG Anjlok 3%" and item["sentiment"] == "negative" and item["source"] == "Kontan"
+    assert use_google_news("BBCA.JK") and not use_google_news("AAPL")
+
+    q = coingecko_quote("BTCUSDT", {"usd": 110.0, "usd_24h_change": 10.0, "usd_24h_vol": 5.0}, None)
+    assert round(q["close_price"], 6) == 100 and round(q["change_percent"], 6) == 10 and q["market_type"] == "crypto"
+    assert coingecko_quote("BTCUSDT", {"usd": None}, None) is None

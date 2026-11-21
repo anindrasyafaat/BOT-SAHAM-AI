@@ -84,57 +84,31 @@ async def database_health(session: AsyncSession = Depends(get_db_session)):
         }
 
 
+FREE_SOURCES = {  # semua gratis tanpa API key
+    "yahoo_finance": "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1d&interval=1d",
+    "coingecko": "https://api.coingecko.com/api/v3/ping",
+    "forex_factory_calendar": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "google_news_rss": "https://news.google.com/rss/search?q=IHSG&hl=id&gl=ID&ceid=ID:id",
+}
+
+
 @router.get("/market-data")
 async def market_data_health():
-    """Market data services health check"""
-    try:
-        # Test market data providers
-        services = {}
-        
-        # Test yfinance
+    """Cek keterjangkauan setiap sumber data gratis yang dipakai sistem."""
+    import httpx
+
+    async def probe(client, url):
         try:
-            import yfinance as yf
-            ticker = yf.Ticker("AAPL")
-            info = ticker.info
-            services["yfinance"] = {
-                "status": "healthy",
-                "data_available": "currentPrice" in info
-            }
+            r = await client.get(url)
+            return {"status": "healthy" if r.status_code < 400 else "unhealthy", "http": r.status_code}
         except Exception as e:
-            services["yfinance"] = {
-                "status": "unhealthy",
-                "error": str(e)
-            }
-            
-        # Test Finnhub (if API key available)
-        if settings.finnhub_api_key:
-            try:
-                import finnhub
-                fh = finnhub.Client(api_key=settings.finnhub_api_key)
-                quote = fh.quote("AAPL")
-                services["finnhub"] = {
-                    "status": "healthy",
-                    "data_available": "c" in quote
-                }
-            except Exception as e:
-                services["finnhub"] = {
-                    "status": "unhealthy",
-                    "error": str(e)
-                }
-        else:
-            services["finnhub"] = {
-                "status": "disabled",
-                "reason": "No API key configured"
-            }
-            
-        return {
-            "status": "healthy",
-            "services": services
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Market data health check error: {e}")
-        raise HTTPException(status_code=500, detail="Market data health check failed")
+            return {"status": "unreachable", "error": str(e)}
+
+    async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0 TradingCommandCenter"}) as c:
+        results = await asyncio.gather(*(probe(c, u) for u in FREE_SOURCES.values()))
+    services = dict(zip(FREE_SOURCES, results))
+    ok = all(v["status"] == "healthy" for v in services.values())
+    return {"status": "healthy" if ok else "degraded", "services": services}
 
 
 @router.get("/websocket")
