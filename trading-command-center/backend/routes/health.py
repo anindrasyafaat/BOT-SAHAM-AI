@@ -100,6 +100,8 @@ async def market_data_health():
     async def probe(client, url):
         try:
             r = await client.get(url)
+            if r.status_code == 429:  # hidup, tetapi sedang membatasi rate (tier gratis)
+                return {"status": "rate_limited", "http": 429}
             return {"status": "healthy" if r.status_code < 400 else "unhealthy", "http": r.status_code}
         except Exception as e:
             return {"status": "unreachable", "error": str(e)}
@@ -107,7 +109,7 @@ async def market_data_health():
     async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0 TradingCommandCenter"}) as c:
         results = await asyncio.gather(*(probe(c, u) for u in FREE_SOURCES.values()))
     services = dict(zip(FREE_SOURCES, results))
-    ok = all(v["status"] == "healthy" for v in services.values())
+    ok = all(v["status"] in ("healthy", "rate_limited") for v in services.values())
     return {"status": "healthy" if ok else "degraded", "services": services}
 
 

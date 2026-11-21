@@ -40,9 +40,20 @@ class OutcomeIn(BaseModel):
 async def generate(body: GenerateIn, request: Request):
     try:
         data = await service.generate(request.app, body.jenis, body.simbol, body.strategi, body.teks)
+    except service.InsightBlocked as e:
+        raise HTTPException(status_code=422, detail={"pesan": str(e), "preflight": e.report})
     except service.InsightError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "success", "data": data}
+
+
+@router.post("/preflight")
+async def preflight(body: GenerateIn, request: Request):
+    """Gerbang 1 tanpa menyimpan: cek kelayakan data & pengalaman sebelum generate."""
+    try:
+        return {"status": "success", "data": await service.check(request.app, body.jenis, body.simbol, body.strategi, body.teks)}
+    except service.InsightError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/patterns")

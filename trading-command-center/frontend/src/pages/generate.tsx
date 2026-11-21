@@ -24,6 +24,15 @@ interface Framework {
   alternatif: Alt[]
   keputusan: { rekomendasi: Alt; cadangan: Alt; checklist: string[]; pre_mortem: string[] }
   rencana_belajar: string[]
+  preflight?: Preflight
+  kontrol_kualitas?: Review
+}
+interface QCheck { id: string; nama: string; status: 'lulus' | 'peringatan' | 'gagal'; detail: string; perbaikan: string | null }
+interface Preflight { checks: QCheck[]; verdict: string; blocking: boolean; jenis?: string; simbol?: string | null }
+interface Review {
+  checks: QCheck[]; verdict: string; keyakinan: number; stabilitas: number | null; pembalik: string[]; advokat_setan: string[]
+  ukuran_posisi: null | { jumlah_maks: number; risiko_idr: number; nilai_idr: number; dibatasi_kas: boolean; risiko_per_trade: number }
+  keputusan_final: Alt & { alasan_kontrol?: string }; diturunkan: boolean
 }
 interface Gen { id: number; jenis: string; simbol: string | null; masalah: string; narasi: string; sumber_narasi: string; dipilih: string | null; hasil: string | null; sumber_hasil: string | null; catatan: string | null; dibuat: string; kerangka?: Framework }
 
@@ -34,6 +43,25 @@ const KINDS: { v: Kind; label: string; hint: string }[] = [
   { v: 'bebas', label: 'Tulis bebas', hint: 'Sebut ticker dengan HURUF BESAR, mis. "BBCA turun terus, perlu cut loss?"' },
 ]
 const fail = (e: unknown) => toast({ title: 'Gagal', description: (e as Error).message, variant: 'destructive' })
+const ICON = { lulus: '✓', peringatan: '!', gagal: '✗' } as const
+const TONE = { lulus: 'text-green-500', peringatan: 'text-yellow-500', gagal: 'text-red-500' } as const
+
+function CheckList({ title, checks }: { title: string; checks: QCheck[] }) {
+  return (
+    <div>
+      <div className="mb-1 text-sm font-medium">{title}</div>
+      <ul className="space-y-1 text-sm" data-testid="qc-list">
+        {checks.map((c) => (
+          <li key={c.id} className="flex gap-2">
+            <span className={cn('w-4 shrink-0 font-bold', TONE[c.status])} aria-label={c.status}>{ICON[c.status]}</span>
+            <span><b>{c.nama}</b> — {c.detail}{c.perbaikan && <span className="text-muted-foreground"> · {c.perbaikan}</span>}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 const fmtKondisi = (k: Record<string, string>) => Object.entries(k).map(([a, b]) => `${a}=${b}`).join(' · ')
 
 function PatternList({ title, items, good }: { title: string; items: Pattern[]; good: boolean }) {
@@ -62,23 +90,39 @@ export function GeneratePage() {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<Gen | null>(null)
+  const [pre, setPre] = useState<Preflight | null>(null)
   const strategies = useApi<{ strategy_name: string }[]>('/api/signals/strategies', 0)
   const patterns = useApi<{ berhasil: Pattern[]; gagal: Pattern[]; total_pengalaman: number }>('/api/insight/patterns', 300000)
   const history = useApi<Gen[]>('/api/insight/history?limit=20', 60000)
 
   const refresh = () => qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith('/api/insight') })
 
+  const body = () => ({
+    jenis: kind, simbol: kind === 'peluang' ? symbol.trim() : undefined,
+    strategi: kind === 'strategi' ? strategy : undefined, teks: text,
+  })
+
   const run = async (e: React.FormEvent) => {
     e.preventDefault()
     setBusy(true)
     try {
-      const r = await postApi('/api/insight/generate', {
-        jenis: kind, simbol: kind === 'peluang' ? symbol.trim() : undefined,
-        strategi: kind === 'strategi' ? strategy : undefined, teks: text,
-      })
+      const r = await postApi('/api/insight/generate', body())
       setResult(r.data)
+      setPre(null)
       refresh()
-    } catch (err) { fail(err) } finally { setBusy(false) }
+    } catch (err) {
+      const d = (err as Error & { detail?: any }).detail
+      if (d?.preflight) {  // gerbang 1 memblokir: tampilkan daftar perbaikan, bukan sekadar error
+        setPre(d.preflight)
+        setResult(null)
+        toast({ title: 'Generate diblokir pemeriksaan kualitas', description: 'Lihat daftar perbaikan di bawah.', variant: 'destructive' })
+      } else fail(err)
+    } finally { setBusy(false) }
+  }
+
+  const precheck = async () => {
+    setBusy(true)
+    try { setPre((await postApi('/api/insight/preflight', body())).data) } catch (err) { fail(err) } finally { setBusy(false) }
   }
 
   const choose = async (g: Gen, op: string) => {
@@ -144,14 +188,68 @@ export function GeneratePage() {
               )}
               <Input className="min-w-[16rem] flex-1" maxLength={1000} required={kind === 'bebas'} value={text} aria-label="Masalah"
                      placeholder={kind === 'bebas' ? 'Ceritakan masalahnya…' : 'Masalah (opsional)'} onChange={(e) => setText(e.target.value)} />
+              <Button type="button" variant="outline" disabled={busy} onClick={precheck}>Cek dulu</Button>
               <Button type="submit" disabled={busy}>{busy ? 'Berpikir…' : 'Generate'}</Button>
             </div>
           </form>
         </CardContent>
       </Card>
 
+      {pre && (
+        <Card data-testid="preflight-panel">
+          <CardHeader>
+            <CardTitle className="flex flex-wrap items-center gap-2">
+              Pemeriksaan sebelum generate
+              <Badge variant={pre.blocking ? 'destructive' : pre.verdict === 'lulus' ? 'default' : 'secondary'}>{pre.verdict}</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent><CheckList title="Kelayakan data & pengalaman" checks={pre.checks} /></CardContent>
+        </Card>
+      )}
+
       {result && fw && (
         <div className="space-y-4" data-testid="generate-result">
+          {fw.kontrol_kualitas && (() => {
+            const q = fw.kontrol_kualitas!
+            return (
+              <Card className={cn(q.diturunkan && 'border-yellow-500')} data-testid="qc-panel">
+                <CardHeader>
+                  <CardTitle className="flex flex-wrap items-center gap-2">
+                    0. Pemeriksaan kualitas
+                    <Badge variant={q.keyakinan >= 70 ? 'default' : q.keyakinan >= 35 ? 'secondary' : 'destructive'}>keyakinan {q.keyakinan}/100</Badge>
+                    {q.stabilitas != null && <Badge variant="outline">stabilitas {q.stabilitas}%</Badge>}
+                    <Badge variant="outline">{q.verdict}</Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="rounded-lg border p-3">
+                    <div className="text-sm text-muted-foreground">Keputusan akhir setelah kontrol</div>
+                    <div className="text-lg font-semibold">{q.keputusan_final.judul}</div>
+                    {q.diturunkan && (
+                      <p className="text-sm text-yellow-600">
+                        Diturunkan dari “{fw.keputusan.rekomendasi.judul}” karena: {q.keputusan_final.alasan_kontrol}
+                      </p>
+                    )}
+                    {q.ukuran_posisi && (
+                      <p className="mt-1 text-sm">
+                        Ukuran maksimal: <b>{q.ukuran_posisi.jumlah_maks.toLocaleString('id-ID')}</b> unit · rugi maks saat kena SL ±
+                        {' '}{q.ukuran_posisi.risiko_idr.toLocaleString('id-ID')} IDR ({(q.ukuran_posisi.risiko_per_trade * 100).toFixed(1)}% modal)
+                        {q.ukuran_posisi.dibatasi_kas && ' · dibatasi kas'}
+                      </p>
+                    )}
+                  </div>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    {fw.preflight && <CheckList title="Gerbang 1 · sebelum generate" checks={fw.preflight.checks} />}
+                    <CheckList title="Gerbang 2 · sebelum menjawab" checks={q.checks} />
+                  </div>
+                  <div>
+                    <div className="mb-1 text-sm font-medium">Advokat setan — argumen terkuat melawan keputusan ini</div>
+                    <ul className="list-inside list-disc text-sm text-muted-foreground">{q.advokat_setan.map((x) => <li key={x}>{x}</li>)}</ul>
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })()}
           <Card>
             <CardHeader>
               <CardTitle className="flex flex-wrap items-center gap-2">

@@ -46,7 +46,11 @@ export async function sendApi(path: string, method: 'POST' | 'DELETE' = 'POST', 
   const json = await res.json().catch(() => ({}))
   if (!res.ok) {
     const d = json.detail
-    throw new Error(typeof d === 'string' ? d : Array.isArray(d) ? d.map((x: any) => x.msg).join('; ') : `${res.status} ${path}`)
+    const err = new Error(typeof d === 'string' ? d : Array.isArray(d) ? d.map((x: any) => x.msg).join('; ')
+      : d?.pesan ?? `${res.status} ${path}`) as Error & { detail?: unknown; status?: number }
+    err.detail = d  // detail terstruktur (mis. laporan preflight saat generate diblokir)
+    err.status = res.status
+    throw err
   }
   return json
 }

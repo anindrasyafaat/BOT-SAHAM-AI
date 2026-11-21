@@ -6,7 +6,7 @@ Mengelola WebSocket connections dan real-time data broadcasting
 import asyncio
 import json
 from typing import Dict, List, Set, Optional, Any
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 from datetime import datetime
 from collections import defaultdict
 from utils.logger import setup_logging
@@ -147,9 +147,12 @@ class ConnectionManager:
             if websocket in self.connection_metadata:
                 self.connection_metadata[websocket]['message_count'] += 1
                 
+        except (WebSocketDisconnect, RuntimeError) as e:
+            # klien menutup tab/koneksi saat broadcast: kejadian normal, bukan error
+            logger.info(f"🔌 Klien terputus saat kirim pesan ({type(e).__name__})")
+            self.disconnect(websocket)
         except Exception as e:
-            logger.error(f"❌ Error sending personal message: {e}")
-            # Remove broken connection
+            logger.error(f"❌ Error sending personal message: {type(e).__name__}: {e}")
             self.disconnect(websocket)
             
     async def _message_processor(self):

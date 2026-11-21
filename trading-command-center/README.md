@@ -37,6 +37,21 @@ sebagian wilayah (HTTP 451), sedangkan Alpha Vantage, Finnhub, dan NewsAPI tidak
 
 | **Kalender ekonomi** | Event minggu ini dari Forex Factory yang berdampak Medium/High (plus semua event IDR), waktu dalam WIB. |
 
+## Generate: kerangka berpikir dengan dua gerbang kualitas
+
+Halaman **Generate** menyusun kerangka 7 tahap (masalah → fakta → pengalaman → hipotesis → 7 alternatif dari
+7 pola pikir → keputusan + pre-mortem → rencana belajar) untuk kasus *peluang aset*, *masalah strategi*,
+*risiko portofolio*, atau *teks bebas*. Setiap keputusan melewati:
+
+| Gerbang | Kapan | Yang diperiksa | Bila gagal |
+|---|---|---|---|
+| **1 · Preflight** | sebelum generate (`POST /api/insight/preflight`, tombol *Cek dulu*) | kesegaran data, harga valid, ≥ 60/200 candle, anomali (lonjakan > 25%, high < low), analog ≥ 30 kejadian, berita, pengalaman sinyal, akurasi model ML | generate **diblokir** (HTTP 422) dengan daftar perbaikan |
+| **2 · Quality control** | sebelum menjawab | konsistensi arah vs bukti, SL < harga < TP, margin keputusan, jumlah & kesepakatan bukti, **uji ketahanan (ablation)**: rekomendasi dibangun ulang tanpa tiap bukti, rekam jejak pola pikir, grounding narasi, **ukuran posisi maksimum** dari `RISK_PER_TRADE` | rekomendasi **diturunkan** ke TUNDA/RISET (yang asli tetap terlihat) |
+
+Hasilnya: skor **keyakinan 0–100** (peringatan kedua gerbang mengurangi skor; dikali stabilitas ablation),
+**advokat setan** (argumen terkuat melawan keputusan), dan keputusan akhir. Semua tersimpan di riwayat; hasil
+keputusan (otomatis setelah 7 hari untuk kasus peluang) menjadi pengalaman berikutnya.
+
 ## Menjalankan
 
 ### Docker (disarankan)

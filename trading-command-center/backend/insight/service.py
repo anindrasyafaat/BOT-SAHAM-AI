@@ -13,7 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.connection import AsyncSessionLocal
-from insight import framework
+from config import settings
+from insight import framework, quality
 from insight.analogs import analog_stats, analog_table
 from insight.context import context_at
 from insight.llm import narrate
@@ -175,7 +176,15 @@ async def facts_portofolio(session, mdm) -> dict:
 
 # ---------------------------------------------------------------- generate
 
-async def generate(app, kind: str, symbol: Optional[str], strategy: Optional[str], text: str) -> dict:
+class InsightBlocked(InsightError):
+    """Gerbang preflight menemukan masalah yang membuat keputusan tidak layak dibuat."""
+
+    def __init__(self, report: dict):
+        super().__init__("Pemeriksaan kualitas memblokir generate")
+        self.report = report
+
+
+async def _prepare(app, session, kind: str, symbol: Optional[str], strategy: Optional[str], text: str) -> dict:
     mdm = getattr(app.state, "market_data_manager", None)
     gen = getattr(app.state, "signal_generator", None)
     if not mdm or not mdm.market_data_cache:
@@ -192,31 +201,93 @@ async def generate(app, kind: str, symbol: Optional[str], strategy: Optional[str
     if eff_kind == "strategi" and not strategy:
         raise InsightError("Kasus strategi butuh nama strategi")
 
-    async with AsyncSessionLocal() as session:
-        records = await experience_records(session)
-        patterns = mine(records)
-        if eff_kind == "peluang":
-            facts = await facts_peluang(session, mdm, gen, symbol)
-            table = await analogs(mdm)
-            experience = {"analog": analog_stats(table, facts["konteks"]), "pola": matching(patterns, facts["konteks"]),
-                          "total_pengalaman": patterns["total_pengalaman"]}
-        elif eff_kind == "strategi":
-            facts = await facts_strategi(session, gen, strategy, records)
-            experience = {"analog": None, "total_pengalaman": patterns["total_pengalaman"], "pola": {
-                "gagal": [p for p in patterns["gagal"] if p["kondisi"].get("strategi") == strategy],
-                "berhasil": [p for p in patterns["berhasil"] if p["kondisi"].get("strategi") not in (None, strategy)]}}
-        else:
-            facts = await facts_portofolio(session, mdm)
-            experience = {"analog": None, "pola": {"berhasil": [], "gagal": []}, "total_pengalaman": patterns["total_pengalaman"]}
+    records = await experience_records(session)
+    patterns = mine(records)
+    if eff_kind == "peluang":
+        facts = await facts_peluang(session, mdm, gen, symbol)
+        table = await analogs(mdm)
+        experience = {"analog": analog_stats(table, facts["konteks"]), "pola": matching(patterns, facts["konteks"]),
+                      "total_pengalaman": patterns["total_pengalaman"]}
+    elif eff_kind == "strategi":
+        facts = await facts_strategi(session, gen, strategy, records)
+        experience = {"analog": None, "total_pengalaman": patterns["total_pengalaman"], "pola": {
+            "gagal": [p for p in patterns["gagal"] if p["kondisi"].get("strategi") == strategy],
+            "berhasil": [p for p in patterns["berhasil"] if p["kondisi"].get("strategi") not in (None, strategy)]}}
+    else:
+        facts = await facts_portofolio(session, mdm)
+        experience = {"analog": None, "pola": {"berhasil": [], "gagal": []}, "total_pengalaman": patterns["total_pengalaman"]}
+    problem = text.strip() or {"peluang": f"Apakah perlu masuk/keluar {symbol}?",
+                               "strategi": f"Apa yang harus dilakukan dengan strategi {strategy}?",
+                               "portofolio": "Bagaimana mengelola risiko portofolio sekarang?"}[eff_kind]
+    return {"kind": kind, "eff_kind": eff_kind, "symbol": symbol, "strategy": strategy, "facts": facts,
+            "experience": experience, "problem": problem, "mdm": mdm, "gen": gen}
 
-        problem = text.strip() or {"peluang": f"Apakah perlu masuk/keluar {symbol}?",
-                                   "strategi": f"Apa yang harus dilakukan dengan strategi {strategy}?",
-                                   "portofolio": "Bagaimana mengelola risiko portofolio sekarang?"}[eff_kind]
-        fw = framework.build(eff_kind, facts, experience, await operator_stats(session, eff_kind), problem)
+
+async def preflight_meta(ctx: dict) -> dict:
+    mdm, gen, facts = ctx["mdm"], ctx["gen"], ctx["facts"]
+    meta = {
+        "umur_data_detik": (datetime.now() - mdm.last_refresh).total_seconds() if mdm.last_refresh else None,
+        "interval": mdm.update_interval, "error_terakhir": mdm.last_error,
+        "pengalaman": ctx["experience"]["total_pengalaman"],
+        "akurasi_ml": gen.ml_strategy.test_accuracy if gen else None,
+    }
+    if ctx["eff_kind"] == "peluang":
+        from news_sentiment.analyzer import SentimentAnalyzer
+        sym = ctx["symbol"]
+        raw = mdm.history.get(sym)
+        tail = raw.tail(6) if raw is not None else None
+        query = sym[:-4] + "-USD" if sym.endswith("USDT") else sym
+        meta.update({
+            "harga": facts.get("harga"), "candle": len(raw) if raw is not None else 0,
+            "lonjakan_maks_persen": float(tail["Close"].pct_change().abs().max() * 100) if tail is not None and len(tail) > 1 else None,
+            "high_low_terbalik": bool((tail["High"] < tail["Low"]).any()) if tail is not None else False,
+            "analog_n": (ctx["experience"].get("analog") or {}).get("n"),
+            "berita": len(await SentimentAnalyzer().get_news(query, 10)),
+        })
+    if ctx["eff_kind"] == "strategi":
+        meta["strategi_tertutup"] = facts["strategi_stat"]["tertutup"]
+    return meta
+
+
+async def check(app, kind: str, symbol: Optional[str], strategy: Optional[str], text: str) -> dict:
+    """Gerbang 1 saja (tanpa menyimpan) — untuk tombol 'Cek dulu'."""
+    async with AsyncSessionLocal() as session:
+        ctx = await _prepare(app, session, kind, symbol, strategy, text)
+        report = quality.preflight(ctx["eff_kind"], await preflight_meta(ctx))
+    return {**report, "jenis": ctx["eff_kind"], "simbol": ctx["symbol"], "strategi": ctx["strategy"]}
+
+
+async def generate(app, kind: str, symbol: Optional[str], strategy: Optional[str], text: str) -> dict:
+    async with AsyncSessionLocal() as session:
+        ctx = await _prepare(app, session, kind, symbol, strategy, text)
+        eff_kind, facts, experience, problem = ctx["eff_kind"], ctx["facts"], ctx["experience"], ctx["problem"]
+
+        # Gerbang 1: data & pengalaman layak dipakai berpikir?
+        pre = quality.preflight(eff_kind, await preflight_meta(ctx))
+        if pre["blocking"]:
+            raise InsightBlocked({**pre, "jenis": eff_kind, "simbol": ctx["symbol"]})
+
+        stats = await operator_stats(session, eff_kind)
+        rebuild = lambda ex: framework.build(eff_kind, facts, experience, stats, problem, exclude=ex)
+        fw = rebuild(frozenset())
         if kind == "bebas":
             fw["ditafsirkan_sebagai"] = eff_kind
+
+        # Gerbang 2: keputusan konsisten, wajar, tahan uji, risikonya terkendali?
+        from paper import broker
+        port = await broker.summary(session, ctx["mdm"])
+        fw["preflight"] = pre
+        fw["kontrol_kualitas"] = quality.review(
+            fw, rebuild, stats, capital=port["total_value"], cash=port["cash_balance"],
+            risk_per_trade=settings.risk_per_trade, fx=ctx["mdm"].to_idr(ctx["symbol"]) if ctx["symbol"] else None,
+            pre_checks=pre["checks"])
+
         text_out, source = await narrate(fw)
-        g = Generation(kind=eff_kind, symbol=symbol, problem=problem, output=json.dumps(fw, default=str),
+        fw["kontrol_kualitas"]["checks"].append({
+            "id": "narasi", "nama": "Grounding narasi", "bobot": 0.5, "perbaikan": None,
+            "status": "peringatan" if "ditolak" in source else "lulus",
+            "detail": source if "ditolak" in source else f"Narasi dari {source}; angka hanya dari bukti"})
+        g = Generation(kind=eff_kind, symbol=ctx["symbol"], problem=problem, output=json.dumps(fw, default=str),
                        narrative=text_out, narrative_source=source,
                        price_at=facts.get("harga") if eff_kind == "peluang" else None)
         session.add(g)

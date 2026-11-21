@@ -21,6 +21,7 @@ HISTORY_PERIOD = "1y"          # cukup untuk EMA/MACD/BB/SMA200 harian
 FUNDAMENTAL_REFRESH = 6 * 3600
 FX_SYMBOL = "USDIDR=X"
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"  # gratis, tanpa API key
+COINGECKO_MIN_INTERVAL = 300  # detik; tier gratis mudah kena 429 bila dipanggil tiap menit
 COINGECKO_IDS = {
     "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "ADAUSDT": "cardano", "SOLUSDT": "solana",
     "DOTUSDT": "polkadot", "LINKUSDT": "chainlink", "POLUSDT": "polygon-ecosystem-token",
@@ -80,6 +81,7 @@ class MarketDataManager:
         self.history: Dict[str, pd.DataFrame] = {}
         self.fundamentals: Dict[str, Dict] = {}
         self.usd_idr: Optional[float] = None
+        self._cg_at = datetime.min
         self.last_refresh: Optional[datetime] = None
         self.last_error: Optional[str] = None
         self._tasks: List[asyncio.Task] = []
@@ -152,7 +154,13 @@ class MarketDataManager:
             self.history[symbol] = df
             quotes[symbol] = self._quote(symbol, df)
         missing = [s for s in self.symbols.get("crypto", []) if s not in frames]
+        now = datetime.now()
+        if missing and (now - self._cg_at).total_seconds() < COINGECKO_MIN_INTERVAL:
+            # batas rate CoinGecko gratis: di antara panggilan, pakai kutipan cadangan terakhir
+            quotes.update({s: self.market_data_cache[s] for s in missing if s in self.market_data_cache})
+            missing = []
         if missing:
+            self._cg_at = now
             try:
                 for sym, cg in (await asyncio.to_thread(self._coingecko, missing)).items():
                     q = coingecko_quote(sym, cg, self.market_data_cache.get(sym))

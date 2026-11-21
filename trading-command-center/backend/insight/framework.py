@@ -218,12 +218,14 @@ def alternatives_portofolio(facts, stats) -> List[dict]:
 
 # ---------------------------------------------------------------- perakitan kerangka
 
-def build(kind: str, facts: dict, experience: dict, operator_stats: Dict[str, Tuple[int, int]], masalah: str) -> dict:
+def build(kind: str, facts: dict, experience: dict, operator_stats: Dict[str, Tuple[int, int]], masalah: str,
+          exclude: frozenset = frozenset()) -> dict:
+    """exclude: teks bukti yang diabaikan (dipakai uji ketahanan / ablation di insight/quality.py)."""
     if kind not in KINDS:
         raise ValueError(f"jenis kasus harus salah satu dari {KINDS}")
     ev, summ = [], None
     if kind in ("peluang", "bebas") and facts.get("simbol"):
-        ev = evidence_for_symbol(facts, experience)
+        ev = [e for e in evidence_for_symbol(facts, experience) if e["teks"] not in exclude]
         summ = summarize(ev)
         alts = alternatives_peluang(facts, experience, summ, operator_stats)
     elif kind == "strategi":
@@ -262,7 +264,15 @@ def narrative(fw: dict) -> str:
     """Ringkasan template (dipakai bila LLM lokal tidak aktif atau ditolak penjaga halusinasi)."""
     rec, alt2 = fw["keputusan"]["rekomendasi"], fw["keputusan"]["cadangan"]
     s = fw["hipotesis"]["ringkasan"]
+    qc = fw.get("kontrol_kualitas")
     head = (f"Bukti condong {s['bias']} (pro {s['pro']}, kontra {s['kontra']}, kesepakatan {s['kesepakatan_bukti']}%). "
             if s else "")
-    return (f"{head}Rekomendasi: {rec['judul']} — {rec['alasan']} (skor {rec['skor']}). "
+    text = (f"{head}Rekomendasi: {rec['judul']} — {rec['alasan']} (skor {rec['skor']}). "
             f"Cadangan: {alt2['judul']} (skor {alt2['skor']}). Batal bila: {rec['titik_batal']}.")
+    if qc:
+        final = qc["keputusan_final"]
+        text += f" Kontrol kualitas: keyakinan {qc['keyakinan']}/100"
+        text += f", stabilitas {qc['stabilitas']}%." if qc["stabilitas"] is not None else "."
+        if final["operator"] != rec["operator"]:
+            text += f" Keputusan akhir diturunkan ke {final['judul']}: {final['alasan_kontrol']}."
+    return text
