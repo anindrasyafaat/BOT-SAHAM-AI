@@ -39,3 +39,27 @@ def adapt(min_confidence: float, enabled: bool, closed: int, win_rate: float,
         new = max(CONF_FLOOR, min_confidence - 1.0)
         return Adaptation(new, enabled, expectancy, f"lebih agresif: ambang {min_confidence:.0f}→{new:.0f}")
     return Adaptation(min_confidence, enabled, expectancy, "stabil: pertahankan parameter")
+
+
+def evaluate_signal(is_buy: bool, entry: float, stop_loss: float, target: float | None,
+                    price: float, expired: bool):
+    """Status penutupan sinyal & P&L persen dari sisi arah sinyal. Kembalikan (status|None, pnl_pct)."""
+    if entry <= 0:
+        return "CANCELLED", 0.0  # data harga rusak: jangan ikut dinilai Brain
+    pnl = (price / entry - 1) * 100 * (1 if is_buy else -1)
+    if (price <= stop_loss) if is_buy else (price >= stop_loss):
+        return "STOPPED_OUT", pnl
+    if target and ((price >= target) if is_buy else (price <= target)):
+        return "TARGET_HIT", pnl
+    if expired:
+        return "EXPIRED", pnl  # dinilai mark-to-market agar tetap jadi bahan belajar
+    return None, pnl
+
+
+def valid_levels(is_buy: bool, entry: float, stop_loss: float, target: float | None) -> bool:
+    """BUY: SL < entry < TP; SELL: TP < entry < SL. Sinyal dengan level terbalik ditolak."""
+    if entry <= 0 or stop_loss <= 0:
+        return False
+    if is_buy:
+        return stop_loss < entry and (target is None or target > entry)
+    return stop_loss > entry and (target is None or 0 < target < entry)

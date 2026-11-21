@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useApi, postApi, ApiState } from '@/hooks/use-api'
+import { toast } from '@/hooks/use-toast'
 import { cn, formatDateTime } from '@/lib/utils'
 import { Brain, Power } from 'lucide-react'
 
@@ -42,8 +43,12 @@ export function BrainPage() {
   const { data, isLoading, error } = useApi<{ strategies: Strategy[]; log: BrainEvent[] }>('/api/signals/brain', 15000)
 
   const toggle = async (name: string) => {
-    await postApi(`/api/signals/strategies/${encodeURIComponent(name)}/toggle`)
-    qc.invalidateQueries(['/api/signals/brain'])
+    try {
+      await postApi(`/api/signals/strategies/${encodeURIComponent(name)}/toggle`)
+      qc.invalidateQueries(['/api/signals/brain'])
+    } catch (e) {
+      toast({ title: `Gagal mengubah ${name}`, description: (e as Error).message, variant: 'destructive' })
+    }
   }
 
   return (

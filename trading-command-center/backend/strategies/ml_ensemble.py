@@ -1,263 +1,142 @@
 """
-Machine Learning Ensemble Strategy untuk Trading Command Center
-ML ensemble menggunakan XGBoost dan LSTM untuk prediksi price movement
+Machine Learning Ensemble Strategy untuk Trading Command Center.
+
+Model nyata (bukan simulasi): RandomForest + XGBoost + LogisticRegression dilatih pada candle harian
+semua simbol, target = harga naik dalam HORIZON hari ke depan. Dilatih ulang tiap hari dan diuji
+out-of-sample pada periode terakhir; sinyal hanya keluar bila akurasi uji di atas MIN_TEST_ACCURACY.
 """
 
-import asyncio
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
-from models.signals import TradingSignal, SignalType, TimeFrame
-from .base import BaseStrategy
-import joblib
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+
+from models.signals import SignalType, TimeFrame, TradingSignal
 from utils.logger import setup_logging
+
+from .base import BaseStrategy
 
 logger = setup_logging()
 
+HORIZON = 5               # hari ke depan yang diprediksi
+TEST_FRACTION = 0.2       # 20% tanggal terakhir untuk uji out-of-sample
+MIN_TEST_ACCURACY = 0.52  # di bawah ini model dianggap tak lebih baik dari tebakan
+MIN_PROBABILITY = 0.60    # ambang probabilitas untuk mengeluarkan sinyal
+RETRAIN_EVERY = timedelta(hours=24)
+FEATURES = [
+    "ret_1", "ret_5", "ret_10", "ma_5_20", "ma_10_50", "vol_5", "vol_20",
+    "volume_ratio", "rsi", "bb_position", "macd_hist_norm", "stoch_k",
+]
+
+
+def feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Fitur tak berskala harga (rasio/persen) agar bisa dipakai lintas simbol."""
+    c, h, l, v = df["close_price"], df["high_price"], df["low_price"], df["volume"]
+    f = pd.DataFrame(index=df.index)
+    f["ret_1"], f["ret_5"], f["ret_10"] = c.pct_change(), c.pct_change(5), c.pct_change(10)
+    f["ma_5_20"] = c.rolling(5).mean() / c.rolling(20).mean() - 1
+    f["ma_10_50"] = c.rolling(10).mean() / c.rolling(50).mean() - 1
+    f["vol_5"], f["vol_20"] = f["ret_1"].rolling(5).std(), f["ret_1"].rolling(20).std()
+    f["volume_ratio"] = v / v.rolling(20).mean()
+    delta = c.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    f["rsi"] = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    mid, sd = c.rolling(20).mean(), c.rolling(20).std()
+    f["bb_position"] = (c - (mid - 2 * sd)) / (4 * sd)
+    macd = c.ewm(span=12).mean() - c.ewm(span=26).mean()
+    f["macd_hist_norm"] = (macd - macd.ewm(span=9).mean()) / c
+    f["stoch_k"] = (c - l.rolling(14).min()) / (h.rolling(14).max() - l.rolling(14).min())
+    return f.replace([np.inf, -np.inf], np.nan)
+
+
+def to_strategy_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    return raw.rename(columns={"Open": "open_price", "High": "high_price", "Low": "low_price",
+                               "Close": "close_price", "Volume": "volume"})
+
 
 class MLEnsembleStrategy(BaseStrategy):
-    """Machine Learning Ensemble Strategy menggunakan multiple ML models"""
-    
     def __init__(self):
         super().__init__("ML_Ensemble")
-        self.models = {}
-        self.scaler = StandardScaler()
-        self.feature_columns = []
-        self.model_trained = False
-        self.prediction_cache = {}
-        self.cache_ttl = 1800  # 30 minutes
-        
-        # Initialize models
-        self._initialize_models()
-        
-    def _initialize_models(self):
-        """Initialize ML models"""
-        try:
-            # XGBoost model
-            self.models['xgboost'] = xgb.XGBClassifier(
-                n_estimators=100,
-                max_depth=6,
-                learning_rate=0.1,
-                objective='binary:logistic',
-                random_state=42
-            )
-            
-            # Random Forest model
-            self.models['random_forest'] = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=10,
-                random_state=42
-            )
-            
-            logger.info("✅ ML models initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Error initializing ML models: {e}")
-            
+        self.models: Dict[str, Any] = {}
+        self.trained_at: Optional[datetime] = None
+        self.test_accuracy: Optional[float] = None
+        self.train_rows = 0
+
+    def _build_models(self):
+        return {
+            "random_forest": RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=50,
+                                                    n_jobs=-1, random_state=42),
+            "xgboost": xgb.XGBClassifier(n_estimators=200, max_depth=3, learning_rate=0.05, subsample=0.8,
+                                         colsample_bytree=0.8, random_state=42, n_jobs=2, verbosity=0),
+            "logistic": make_pipeline(StandardScaler(), LogisticRegression(max_iter=500)),
+        }
+
+    def needs_training(self) -> bool:
+        return self.trained_at is None or datetime.now() - self.trained_at > RETRAIN_EVERY
+
+    def train(self, histories: Dict[str, pd.DataFrame]) -> Optional[float]:
+        """Latih ensemble pada semua simbol (sinkron; panggil lewat asyncio.to_thread)."""
+        self.trained_at = datetime.now()  # waktu percobaan: gagal pun menunggu RETRAIN_EVERY
+        parts = []
+        for sym, raw in histories.items():
+            df = to_strategy_frame(raw)
+            f = feature_frame(df)
+            f["y"] = (df["close_price"].shift(-HORIZON) / df["close_price"] - 1 > 0).astype(float)
+            f.loc[f.index[-HORIZON:], "y"] = np.nan  # label masa depan belum diketahui
+            f["date"] = [d.date() for d in f.index]
+            parts.append(f.dropna())
+        if not parts:
+            return None
+        data = pd.concat(parts)
+        if len(data) < 1000:
+            logger.warning(f"⚠️ ML: data latih terlalu sedikit ({len(data)} baris)")
+            return None
+        dates = sorted(data["date"].unique())
+        cutoff = dates[int(len(dates) * (1 - TEST_FRACTION))]
+        # jeda HORIZON hari agar label train tidak bocor ke periode uji
+        gap = dates[max(0, dates.index(cutoff) - HORIZON)]
+        train, test = data[data["date"] < gap], data[data["date"] >= cutoff]
+        models = self._build_models()
+        for m in models.values():
+            m.fit(train[FEATURES], train["y"])
+        prob = np.mean([m.predict_proba(test[FEATURES])[:, 1] for m in models.values()], axis=0)
+        acc = float(((prob >= 0.5) == test["y"].astype(bool)).mean())
+        for m in models.values():  # model akhir memakai seluruh data
+            m.fit(data[FEATURES], data["y"])
+        self.models, self.test_accuracy, self.train_rows = models, acc, len(data)
+        logger.info(f"🤖 ML ensemble dilatih: {len(data)} baris, akurasi uji out-of-sample {acc:.1%}")
+        return acc
+
+    def predict_proba(self, df: pd.DataFrame) -> Optional[float]:
+        if not self.models:
+            return None
+        row = feature_frame(df)[FEATURES].iloc[[-1]]
+        if row.isna().any(axis=None):
+            return None
+        return float(np.mean([m.predict_proba(row)[:, 1][0] for m in self.models.values()]))
+
     async def generate_signals(self, symbol: str, df: pd.DataFrame, market_data: Dict[str, Any]) -> List[TradingSignal]:
-        """Generate signals menggunakan ML ensemble"""
-        signals = []
-        
+        if not self.models or (self.test_accuracy or 0) < MIN_TEST_ACCURACY or not self.validate_data(df, min_bars=60):
+            return []
         try:
-            if not self.validate_data(df, min_bars=100):
-                return signals
-                
-            # Prepare features
-            features = await self._prepare_features(df, market_data)
-            
-            if features is None:
-                return signals
-                
-            # Get prediction dari ensemble
-            prediction_result = await self._get_ensemble_prediction(symbol, features)
-            
-            if prediction_result is None:
-                return signals
-                
-            prediction, probability, confidence = prediction_result
-            
-            # Generate signal jika confidence cukup tinggi
-            if confidence >= 0.7:  # 70% confidence threshold
-                signal = await self._create_ml_signal(
-                    symbol, prediction, probability, confidence, market_data, df
-                )
-                if signal:
-                    signals.append(signal)
-                    
+            p = self.predict_proba(df)
+            if p is None or (1 - MIN_PROBABILITY) < p < MIN_PROBABILITY:
+                return []
+            prediction = 1 if p >= MIN_PROBABILITY else 0
+            confidence = p if prediction else 1 - p
+            signal = await self._create_ml_signal(symbol, prediction, p, confidence, market_data, df)
+            return [signal] if signal else []
         except Exception as e:
             logger.error(f"❌ Error generating ML ensemble signals for {symbol}: {e}")
-            
-        return signals
-        
-    async def _prepare_features(self, df: pd.DataFrame, market_data: Dict[str, Any]) -> Optional[np.ndarray]:
-        """Prepare features untuk ML models"""
-        try:
-            # Technical indicators sebagai features
-            features_df = df.copy()
-            
-            # Price-based features
-            features_df['price_change'] = features_df['close_price'].pct_change()
-            features_df['price_change_5'] = features_df['close_price'].pct_change(5)
-            features_df['price_change_10'] = features_df['close_price'].pct_change(10)
-            
-            # Moving averages
-            features_df['ma_5'] = features_df['close_price'].rolling(5).mean()
-            features_df['ma_10'] = features_df['close_price'].rolling(10).mean()
-            features_df['ma_20'] = features_df['close_price'].rolling(20).mean()
-            features_df['ma_50'] = features_df['close_price'].rolling(50).mean()
-            
-            # MA ratios
-            features_df['ma_5_20_ratio'] = features_df['ma_5'] / features_df['ma_20']
-            features_df['ma_10_50_ratio'] = features_df['ma_10'] / features_df['ma_50']
-            
-            # Volatility features
-            features_df['volatility_5'] = features_df['price_change'].rolling(5).std()
-            features_df['volatility_20'] = features_df['price_change'].rolling(20).std()
-            
-            # Volume features
-            features_df['volume_ma_5'] = features_df['volume'].rolling(5).mean()
-            features_df['volume_ma_20'] = features_df['volume'].rolling(20).mean()
-            features_df['volume_ratio'] = features_df['volume'] / features_df['volume_ma_20']
-            
-            # RSI
-            delta = features_df['close_price'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            features_df['rsi'] = 100 - (100 / (1 + rs))
-            
-            # Bollinger Bands
-            features_df['bb_middle'] = features_df['close_price'].rolling(20).mean()
-            bb_std = features_df['close_price'].rolling(20).std()
-            features_df['bb_upper'] = features_df['bb_middle'] + (bb_std * 2)
-            features_df['bb_lower'] = features_df['bb_middle'] - (bb_std * 2)
-            features_df['bb_position'] = (features_df['close_price'] - features_df['bb_lower']) / (features_df['bb_upper'] - features_df['bb_lower'])
-            
-            # MACD
-            ema_12 = features_df['close_price'].ewm(span=12).mean()
-            ema_26 = features_df['close_price'].ewm(span=26).mean()
-            features_df['macd'] = ema_12 - ema_26
-            features_df['macd_signal'] = features_df['macd'].ewm(span=9).mean()
-            features_df['macd_histogram'] = features_df['macd'] - features_df['macd_signal']
-            
-            # Stochastic
-            high_14 = features_df['high_price'].rolling(14).max()
-            low_14 = features_df['low_price'].rolling(14).min()
-            features_df['stoch_k'] = 100 * ((features_df['close_price'] - low_14) / (high_14 - low_14))
-            features_df['stoch_d'] = features_df['stoch_k'].rolling(3).mean()
-            
-            # Select features
-            feature_columns = [
-                'price_change', 'price_change_5', 'price_change_10',
-                'ma_5_20_ratio', 'ma_10_50_ratio',
-                'volatility_5', 'volatility_20',
-                'volume_ratio', 'rsi', 'bb_position',
-                'macd', 'macd_signal', 'macd_histogram',
-                'stoch_k', 'stoch_d'
-            ]
-            
-            # Get latest features
-            latest_features = features_df[feature_columns].iloc[-1].values
-            
-            # Handle NaN values
-            latest_features = np.nan_to_num(latest_features, nan=0.0)
-            
-            return latest_features.reshape(1, -1)
-            
-        except Exception as e:
-            logger.error(f"❌ Error preparing ML features: {e}")
-            return None
-            
-    async def _get_ensemble_prediction(self, symbol: str, features: np.ndarray) -> Optional[tuple]:
-        """Get ensemble prediction dari multiple models"""
-        try:
-            # Check cache
-            cache_key = f"ml_prediction_{symbol}"
-            current_time = datetime.now()
-            
-            if cache_key in self.prediction_cache:
-                cached_data = self.prediction_cache[cache_key]
-                if (current_time - cached_data['timestamp']).total_seconds() < self.cache_ttl:
-                    return cached_data['prediction'], cached_data['probability'], cached_data['confidence']
-                    
-            # Simulate prediction (dalam production, model akan trained)
-            # Untuk demo, kita gunakan rule-based logic dengan random component
-            prediction, probability, confidence = await self._simulate_ml_prediction(features)
-            
-            # Cache result
-            self.prediction_cache[cache_key] = {
-                'prediction': prediction,
-                'probability': probability,
-                'confidence': confidence,
-                'timestamp': current_time
-            }
-            
-            return prediction, probability, confidence
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting ensemble prediction for {symbol}: {e}")
-            return None
-            
-    async def _simulate_ml_prediction(self, features: np.ndarray) -> tuple:
-        """Simulate ML prediction untuk demo"""
-        try:
-            # Extract key features untuk decision making
-            rsi = features[0][8] if len(features[0]) > 8 else 50  # RSI
-            bb_position = features[0][9] if len(features[0]) > 9 else 0.5  # BB position
-            volume_ratio = features[0][7] if len(features[0]) > 7 else 1.0  # Volume ratio
-            macd_histogram = features[0][12] if len(features[0]) > 12 else 0.0  # MACD histogram
-            
-            # Rule-based logic dengan noise
-            import random
-            noise = random.uniform(-0.1, 0.1)
-            
-            # Bullish conditions
-            bullish_score = 0
-            if rsi < 30:  # Oversold
-                bullish_score += 0.3
-            elif rsi > 70:  # Overbought
-                bullish_score -= 0.3
-                
-            if bb_position < 0.2:  # Near lower band
-                bullish_score += 0.2
-            elif bb_position > 0.8:  # Near upper band
-                bullish_score -= 0.2
-                
-            if volume_ratio > 1.5:  # High volume
-                bullish_score += 0.2
-                
-            if macd_histogram > 0:  # Positive MACD histogram
-                bullish_score += 0.1
-            else:
-                bullish_score -= 0.1
-                
-            # Add noise untuk simulate model uncertainty
-            bullish_score += noise
-            
-            # Determine prediction
-            if bullish_score > 0.3:
-                prediction = 1  # Buy
-                probability = min(0.9, 0.6 + bullish_score)
-            elif bullish_score < -0.3:
-                prediction = 0  # Sell
-                probability = min(0.9, 0.6 - bullish_score)
-            else:
-                prediction = 1 if random.random() > 0.5 else 0  # Random untuk neutral
-                probability = 0.5 + abs(bullish_score)
-                
-            # Calculate confidence
-            confidence = probability
-            
-            return prediction, probability, confidence
-            
-        except Exception as e:
-            logger.error(f"❌ Error simulating ML prediction: {e}")
-            return 1, 0.6, 0.6  # Default values
-            
+            return []
+
     async def _create_ml_signal(self, symbol: str, prediction: int, probability: float, 
                               confidence: float, market_data: Dict[str, Any], df: pd.DataFrame) -> Optional[TradingSignal]:
         """Create ML-based signal"""
@@ -295,14 +174,14 @@ class MLEnsembleStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="ML_Ensemble",
-                timeframe=TimeFrame.H1,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence * 100,  # Convert to percentage
                 entry_price=entry_price,
                 target_price_1=target_price_1,
                 stop_loss=stop_loss,
                 risk_reward_ratio=risk_reward,
-                technical_analysis=f"ML Ensemble prediction: {'BUY' if prediction == 1 else 'SELL'} "
-                                 f"(probability: {probability:.2%}, confidence: {confidence:.2%}). "
+                technical_analysis=f"ML Ensemble: peluang naik {HORIZON} hari {probability:.1%} "
+                                 f"(confidence {confidence:.1%}). "
                                  f"{features_summary}",
                 generated_at=datetime.now(),
                 expires_at=datetime.now() + timedelta(hours=24)
@@ -313,49 +192,6 @@ class MLEnsembleStrategy(BaseStrategy):
             return None
             
     async def _get_features_summary(self, df: pd.DataFrame) -> str:
-        """Get summary of key features untuk analysis text"""
-        try:
-            latest_data = df.iloc[-1]
-            
-            # Key indicators
-            rsi = getattr(latest_data, 'rsi', 50) if hasattr(latest_data, 'rsi') else 50
-            bb_position = getattr(latest_data, 'bb_position', 0.5) if hasattr(latest_data, 'bb_position') else 0.5
-            volume_ratio = getattr(latest_data, 'volume_ratio', 1.0) if hasattr(latest_data, 'volume_ratio') else 1.0
-            
-            summary = f"RSI: {rsi:.1f}, BB Position: {bb_position:.2f}, Volume Ratio: {volume_ratio:.2f}"
-            
-            return summary
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting features summary: {e}")
-            return "Technical indicators analyzed"
-            
-    async def train_models(self, training_data: Dict[str, Any]):
-        """Train ML models dengan historical data"""
-        try:
-            # Dalam production, implementasi training pipeline
-            # Untuk demo, kita set flag trained
-            self.model_trained = True
-            logger.info("✅ ML models trained successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Error training ML models: {e}")
-            
-    def save_models(self, filepath: str):
-        """Save trained models ke file"""
-        try:
-            # Dalam production, implementasi model serialization
-            logger.info(f"✅ ML models saved to {filepath}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error saving ML models: {e}")
-            
-    def load_models(self, filepath: str):
-        """Load trained models dari file"""
-        try:
-            # Dalam production, implementasi model deserialization
-            self.model_trained = True
-            logger.info(f"✅ ML models loaded from {filepath}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error loading ML models: {e}")
+        f = feature_frame(df).iloc[-1]
+        return (f"RSI {f['rsi']:.1f}, posisi BB {f['bb_position']:.2f}, volume {f['volume_ratio']:.2f}x; "
+                f"akurasi uji model {self.test_accuracy:.1%}, horizon {HORIZON} hari")

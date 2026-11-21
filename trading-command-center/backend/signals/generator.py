@@ -18,7 +18,7 @@ from strategies.technical import TechnicalStrategy
 from strategies.fundamental import FundamentalStrategy
 from strategies.sentiment import SentimentStrategy
 from strategies.ml_ensemble import MLEnsembleStrategy
-from signals.learning import adapt
+from signals.learning import adapt, evaluate_signal, valid_levels
 from collections import deque
 from config import settings, get_supported_symbols
 from utils.logger import setup_logging
@@ -104,6 +104,18 @@ class SignalGenerator:
                     configs = (await session.execute(select(StrategyConfig))).scalars().all()
 
                 self.strategy_configs = {c.strategy_name: c.to_dict() for c in configs}
+
+                recent = (await session.execute(
+                    select(TradingSignal)
+                    .where(TradingSignal.generated_at >= datetime.now() - timedelta(hours=self.parameters.signal_expiry_hours))
+                    .order_by(TradingSignal.generated_at))).scalars().all()
+                for sig in recent:  # cegah sinyal yang sama dibuat ulang setelah restart
+                    self.signal_cache[f"{sig.symbol}_{sig.strategy_name}"] = sig.to_dict()
+                active = (await session.execute(
+                    select(TradingSignal).where(TradingSignal.status == SignalStatus.ACTIVE))).scalars().all()
+                for sig in active:
+                    self.active_signals.setdefault(sig.symbol, []).append(sig)
+                logger.info(f"✅ {len(active)} sinyal aktif dimuat dari database")
                     
         except Exception as e:
             logger.error(f"❌ Error loading strategy configs: {e}")
@@ -207,6 +219,9 @@ class SignalGenerator:
                 logger.warning("⚠️ No market data available for signal generation")
                 return
                 
+            if self.ml_strategy.needs_training() and self.market_data_manager.history:
+                await asyncio.to_thread(self.ml_strategy.train, dict(self.market_data_manager.history))
+
             # Process setiap symbol
             for symbol, data in market_data.items():
                 # Skip jika belum waktunya (rate limiting)
@@ -232,7 +247,7 @@ class SignalGenerator:
         
         try:
             # Get historical data untuk analysis
-            historical_data = await self.market_data_manager.get_historical_data(symbol, days=30)
+            historical_data = await self.market_data_manager.get_historical_data(symbol, days=250)
             
             if not historical_data:
                 return signals
@@ -316,7 +331,7 @@ class SignalGenerator:
             # Send notifications
             await self._send_signal_notification(signal)
             
-            logger.info(f"🚀 New {signal.signal_type} signal for {signal.symbol} "
+            logger.info(f"🚀 New {signal.signal_type.value} signal for {signal.symbol} "
                        f"({signal.strategy_name}) - Confidence: {signal.confidence_score}%")
             
         except Exception as e:
@@ -326,6 +341,11 @@ class SignalGenerator:
         """Validate signal sebelum diproses"""
         try:
             # Check confidence score
+            if not valid_levels(signal.signal_type in (SignalType.BUY, SignalType.STRONG_BUY),
+                                float(signal.entry_price), float(signal.stop_loss),
+                                float(signal.target_price_1) if signal.target_price_1 else None):
+                logger.warning(f"⚠️ Sinyal {signal.strategy_name} {signal.symbol} ditolak: level SL/TP tidak konsisten")
+                return False
             cfg = self.strategy_configs.get(signal.strategy_name)
             if cfg and not cfg["enabled"]:
                 return False
@@ -344,7 +364,7 @@ class SignalGenerator:
                 if cached_signal['signal_type'] == signal.signal_type.value:
                     # Check if signal is too recent
                     time_diff = datetime.now() - datetime.fromisoformat(cached_signal['generated_at'])
-                    if time_diff.total_seconds() < 3600:  # 1 hour
+                    if time_diff.total_seconds() < self.parameters.signal_expiry_hours * 3600:  # candle harian: satu sinyal per arah per masa berlaku
                         return False
                         
             return True
@@ -412,51 +432,41 @@ Risk/Reward: {signal.risk_reward_ratio or 'N/A'}
                 await asyncio.sleep(10)
                 
     async def _validate_active_signals(self):
-        """Validate dan update active signals"""
+        """Tutup sinyal yang kena SL/TP atau kedaluwarsa; P&L dari sisi arah sinyal (lihat learning.evaluate_signal)."""
         try:
-            current_time = datetime.now()
-            
+            now = datetime.now()
             for symbol, signals in self.active_signals.items():
-                updated_signals = []
-                
+                quote = self.market_data_manager.get_market_data(symbol)
+                still_active = []
                 for signal in signals:
-                    # Check expiry
-                    if signal.expires_at and current_time > signal.expires_at:
-                        signal.status = SignalStatus.EXPIRED
-                        await self._update_signal_status(signal)
-                        continue
-                        
-                    # Check stop loss dan target
-                    market_data = self.market_data_manager.get_market_data(symbol)
-                    if market_data:
-                        current_price = market_data.get('current_price', 0)
-                        
-                        # Check stop loss
-                        if signal.signal_type in [SignalType.BUY, SignalType.STRONG_BUY]:
-                            if current_price <= signal.stop_loss:
-                                signal.status = SignalStatus.STOPPED_OUT
-                                signal.closed_at = current_time
-                                signal.pnl_amount = current_price - signal.entry_price
-                                signal.pnl_percent = (signal.pnl_amount / signal.entry_price) * 100
+                    try:
+                        expired = bool(signal.expires_at and now > signal.expires_at)
+                        if not quote:
+                            if expired:  # tanpa harga: tutup tanpa P&L
+                                signal.status, signal.closed_at = SignalStatus.EXPIRED, now
                                 await self._update_signal_status(signal)
-                                continue
-                                
-                        # Check target hits
-                        if signal.target_price_1 and current_price >= signal.target_price_1:
-                            signal.status = SignalStatus.TARGET_HIT
-                            signal.closed_at = current_time
-                            signal.pnl_amount = current_price - signal.entry_price
-                            signal.pnl_percent = (signal.pnl_amount / signal.entry_price) * 100
-                            await self._update_signal_status(signal)
+                            else:
+                                still_active.append(signal)
                             continue
-                            
-                    updated_signals.append(signal)
-                    
-                self.active_signals[symbol] = updated_signals
-                
+                        price, entry = float(quote["current_price"]), float(signal.entry_price)
+                        status, pnl = evaluate_signal(
+                            signal.signal_type in (SignalType.BUY, SignalType.STRONG_BUY), entry,
+                            float(signal.stop_loss), float(signal.target_price_1) if signal.target_price_1 else None,
+                            price, expired)
+                        if status is None:
+                            still_active.append(signal)
+                            continue
+                        signal.status, signal.closed_at = SignalStatus(status), now
+                        signal.pnl_percent = pnl
+                        signal.pnl_amount = entry * pnl / 100
+                        await self._update_signal_status(signal)
+                    except Exception as e:  # satu sinyal rusak tidak boleh menghentikan penutupan sinyal lain
+                        logger.error(f"❌ Error validating signal {signal.id} {symbol}: {e}")
+                        still_active.append(signal)
+                self.active_signals[symbol] = still_active
         except Exception as e:
             logger.error(f"❌ Error validating signals: {e}")
-            
+
     async def _update_signal_status(self, signal: TradingSignal):
         """Update signal status di database"""
         try:
@@ -492,13 +502,10 @@ Risk/Reward: {signal.risk_reward_ratio or 'N/A'}
         """Update performance metrics untuk strategies"""
         try:
             # Calculate performance untuk setiap strategy
-            strategies = [
-                "EMA_Crossover", "SuperTrend_RSI", "Bollinger_MACD",
-                "VWAP_OrderBlock", "Breakout_Volume", "Mean_Reversion",
-                "Liquidity_Sweep", "Golden_Cross", "Heikin_Ashi", "ML_Ensemble"
-            ]
-            
-            for strategy in strategies:
+            from sqlalchemy import select
+            async with AsyncSessionLocal() as session:
+                names = set((await session.execute(select(TradingSignal.strategy_name).distinct())).scalars())
+            for strategy in sorted(names | set(self.strategy_configs)):
                 await self._calculate_strategy_performance(strategy)
                 
         except Exception as e:
@@ -529,7 +536,8 @@ Risk/Reward: {signal.risk_reward_ratio or 'N/A'}
                 winning_signals = len([s for s in signals if s.pnl_percent and s.pnl_percent > 0])
                 losing_signals = len([s for s in signals if s.pnl_percent and s.pnl_percent < 0])
                 
-                win_rate = (winning_signals / total_signals * 100) if total_signals > 0 else 0
+                closed = winning_signals + losing_signals
+                win_rate = (winning_signals / closed * 100) if closed > 0 else 0
                 
                 # Calculate average profit/loss
                 profits = [s.pnl_percent for s in signals if s.pnl_percent and s.pnl_percent > 0]
@@ -580,12 +588,18 @@ Risk/Reward: {signal.risk_reward_ratio or 'N/A'}
         cfg = (await session.execute(
             select(StrategyConfig).where(StrategyConfig.strategy_name == strategy_name)
         )).scalar_one_or_none()
-        if not cfg:
-            return
+        if not cfg:  # strategi baru (mis. Fundamental/Sentiment) ikut dikelola Brain
+            cfg = StrategyConfig(strategy_name=strategy_name, enabled=True,
+                                 min_confidence=self.parameters.min_confidence, max_positions=5,
+                                 risk_per_trade=0.02, trading_hours_only=False, min_time_between_signals=3600)
+            session.add(cfg)
+            await session.flush()
         a = adapt(float(cfg.min_confidence), cfg.enabled, closed, win_rate, avg_profit, avg_loss)
         changed = a.min_confidence != float(cfg.min_confidence) or a.enabled != cfg.enabled
         cfg.min_confidence, cfg.enabled = a.min_confidence, a.enabled
-        self.strategy_configs[strategy_name] = {**cfg.to_dict(), "min_confidence": a.min_confidence, "enabled": a.enabled}
+        await session.flush()
+        await session.refresh(cfg)  # hindari lazy-load kolom server-default di konteks async
+        self.strategy_configs[strategy_name] = cfg.to_dict()
         if changed:
             event = {
                 "time": datetime.now().isoformat(), "strategy": strategy_name, "reason": a.reason,

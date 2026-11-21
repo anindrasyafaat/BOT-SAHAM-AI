@@ -21,14 +21,14 @@ if DATABASE_URL.startswith("sqlite"):
     # SQLite async support
     engine = create_async_engine(
         DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://"),
-        echo=settings.debug,
+        echo=False,
         connect_args={"check_same_thread": False}
     )
 else:
     # Untuk database lain (PostgreSQL, MySQL, dll)
     engine = create_async_engine(
         DATABASE_URL,
-        echo=settings.debug,
+        echo=False,
         pool_size=20,
         max_overflow=0,
         pool_pre_ping=True
@@ -50,13 +50,14 @@ Base = declarative_base()
 async def init_database() -> None:
     """Inisialisasi database dan create tables"""
     try:
+        if DATABASE_URL.startswith("sqlite:///"):  # folder file SQLite (mis. data/) belum tentu ada
+            from pathlib import Path
+            Path(DATABASE_URL[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
         async with engine.begin() as conn:
             # Import semua models
             from models.market_data import MarketData
             from models.signals import TradingSignal
-            from models.portfolio import Portfolio, Position, Trade
-            from models.news import NewsArticle, Sentiment
-            from models.screener import ScreenerResult
+            from models.portfolio import Position, Trade
             
             # Create semua tables
             await conn.run_sync(Base.metadata.create_all)
@@ -89,46 +90,3 @@ async def close_database() -> None:
         logger.info("✅ Database connection closed")
     except Exception as e:
         logger.error(f"❌ Error closing database: {e}")
-
-
-# Utility functions untuk database operations
-class DatabaseManager:
-    """Manager untuk operasi database umum"""
-    
-    @staticmethod
-    async def execute_query(session: AsyncSession, query: str, params: dict = None):
-        """Execute raw SQL query"""
-        result = await session.execute(query, params or {})
-        return result
-    
-    @staticmethod
-    async def bulk_insert(session: AsyncSession, objects: list):
-        """Bulk insert objects"""
-        session.add_all(objects)
-        await session.commit()
-    
-    @staticmethod
-    async def get_table_stats(session: AsyncSession) -> dict:
-        """Get statistics untuk semua tables"""
-        from models.market_data import MarketData
-        from models.signals import TradingSignal
-        from models.portfolio import Portfolio, Position, Trade
-        from models.news import NewsArticle
-        
-        stats = {}
-        
-        # Hitung jumlah records per table
-        tables = {
-            "market_data": MarketData,
-            "signals": TradingSignal,
-            "portfolios": Portfolio,
-            "positions": Position,
-            "trades": Trade,
-            "news": NewsArticle
-        }
-        
-        for table_name, model in tables.items():
-            count = await session.query(model).count()
-            stats[table_name] = count
-            
-        return stats

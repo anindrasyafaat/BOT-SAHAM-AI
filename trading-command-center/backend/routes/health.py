@@ -3,97 +3,54 @@ Health Check Routes untuk Trading Command Center
 API endpoints untuk system health monitoring
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import Request, APIRouter, Depends, HTTPException
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.connection import get_db_session, engine
 from config import settings
 from utils.logger import setup_logging
 import asyncio
-import redis.asyncio as redis
 
 logger = setup_logging()
 router = APIRouter()
 
 
 @router.get("/")
-async def health_check(session: AsyncSession = Depends(get_db_session)):
-    """Comprehensive health check untuk semua services"""
+async def health_check(request: Request, session: AsyncSession = Depends(get_db_session)):
+    """Health check nyata: database, data pasar, signal generator, websocket, resource sistem."""
+    import psutil
+    from datetime import datetime
+    from sqlalchemy import text
+
+    status = {"status": "healthy", "timestamp": datetime.now().isoformat(), "version": "1.0.0",
+              "environment": settings.environment, "services": {}}
     try:
-        health_status = {
-            "status": "healthy",
-            "timestamp": "2024-01-01T00:00:00Z",
-            "version": "1.0.0",
-            "environment": settings.environment,
-            "services": {}
-        }
-        
-        # Database health check
-        try:
-            await session.execute("SELECT 1")
-            health_status["services"]["database"] = {
-                "status": "healthy",
-                "type": "SQLite",
-                "url": settings.database_url.replace("sqlite:///", "sqlite://")
-            }
-        except Exception as e:
-            health_status["services"]["database"] = {
-                "status": "unhealthy",
-                "error": str(e)
-            }
-            health_status["status"] = "degraded"
-            
-        # Redis health check
-        try:
-            redis_client = redis.from_url(settings.redis_url)
-            await redis_client.ping()
-            await redis_client.close()
-            health_status["services"]["redis"] = {
-                "status": "healthy",
-                "url": settings.redis_url
-            }
-        except Exception as e:
-            health_status["services"]["redis"] = {
-                "status": "unhealthy",
-                "error": str(e)
-            }
-            health_status["status"] = "degraded"
-            
-        # Market data services health check
-        health_status["services"]["market_data"] = {
-            "status": "healthy",
-            "providers": {
-                "yfinance": "enabled",
-                "finnhub": "enabled" if settings.finnhub_api_key else "disabled",
-                "alpha_vantage": "enabled" if settings.alpha_vantage_api_key else "disabled"
-            }
-        }
-        
-        # Signal generator health check
-        health_status["services"]["signal_generator"] = {
-            "status": "healthy",
-            "active_strategies": 10,
-            "min_confidence": settings.min_confidence_score
-        }
-        
-        # WebSocket health check
-        health_status["services"]["websocket"] = {
-            "status": "healthy",
-            "connections": "active"
-        }
-        
-        # System resources
-        import psutil
-        health_status["system"] = {
-            "cpu_usage": psutil.cpu_percent(),
-            "memory_usage": psutil.virtual_memory().percent,
-            "disk_usage": psutil.disk_usage('/').percent
-        }
-        
-        return health_status
-        
+        await session.execute(text("SELECT 1"))
+        status["services"]["database"] = {"status": "healthy", "type": settings.database_url.split(":")[0]}
     except Exception as e:
-        logger.error(f"❌ Health check error: {e}")
-        raise HTTPException(status_code=500, detail="Health check failed")
+        status["services"]["database"] = {"status": "unhealthy", "error": str(e)}
+        status["status"] = "degraded"
+
+    mdm = getattr(request.app.state, "market_data_manager", None)
+    md_ok = bool(mdm and mdm.market_data_cache)
+    status["services"]["market_data"] = {
+        "status": "healthy" if md_ok else "starting", "provider": "yfinance",
+        "symbols": len(mdm.market_data_cache) if mdm else 0,
+        "last_refresh": mdm.last_refresh.isoformat() if mdm and mdm.last_refresh else None,
+        "last_error": mdm.last_error if mdm else None,
+    }
+    gen = getattr(request.app.state, "signal_generator", None)
+    status["services"]["signal_generator"] = {
+        "status": "healthy" if gen and gen.running else "stopped",
+        "strategies": len(gen.strategy_configs) if gen else 0,
+        "enabled": sum(c["enabled"] for c in gen.strategy_configs.values()) if gen else 0,
+        "ml_test_accuracy": gen.ml_strategy.test_accuracy if gen else None,
+    }
+    if not md_ok or not (gen and gen.running):
+        status["status"] = "degraded"
+    status["system"] = {"cpu_usage": psutil.cpu_percent(), "memory_usage": psutil.virtual_memory().percent,
+                        "disk_usage": psutil.disk_usage("/").percent}
+    return status
 
 
 @router.get("/database")
@@ -101,7 +58,7 @@ async def database_health(session: AsyncSession = Depends(get_db_session)):
     """Database-specific health check"""
     try:
         # Test database connection
-        await session.execute("SELECT 1")
+        await session.execute(text("SELECT 1"))
         
         # Get database stats
         from models.market_data import MarketData
@@ -121,33 +78,6 @@ async def database_health(session: AsyncSession = Depends(get_db_session)):
         
     except Exception as e:
         logger.error(f"❌ Database health check error: {e}")
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-
-
-@router.get("/redis")
-async def redis_health():
-    """Redis-specific health check"""
-    try:
-        redis_client = redis.from_url(settings.redis_url)
-        await redis_client.ping()
-        
-        # Get Redis info
-        info = await redis_client.info()
-        await redis_client.close()
-        
-        return {
-            "status": "healthy",
-            "version": info.get("redis_version"),
-            "memory_used": info.get("used_memory_human"),
-            "connected_clients": info.get("connected_clients"),
-            "uptime_days": info.get("uptime_in_days")
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Redis health check error: {e}")
         return {
             "status": "unhealthy",
             "error": str(e)

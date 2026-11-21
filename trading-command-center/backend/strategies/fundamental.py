@@ -4,7 +4,7 @@ Analisis fundamental otomatis untuk stock selection
 """
 
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from models.signals import TradingSignal, SignalType, TimeFrame
 from .base import BaseStrategy
 from utils.logger import setup_logging

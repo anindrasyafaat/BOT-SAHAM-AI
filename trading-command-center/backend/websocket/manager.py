@@ -140,7 +140,8 @@ class ConnectionManager:
     async def send_personal_message(self, websocket: WebSocket, message: Dict[str, Any]):
         """Send personal message ke specific WebSocket"""
         try:
-            await websocket.send_json(message)
+            # default=str: payload berisi datetime; send_json akan gagal dan memutus klien
+            await websocket.send_text(json.dumps(message, default=str))
             
             # Update message count
             if websocket in self.connection_metadata:

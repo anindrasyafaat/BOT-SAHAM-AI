@@ -2,7 +2,10 @@ import { useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
-import { useApi, ApiState } from '@/hooks/use-api'
+import { useApi, postApi, ApiState } from '@/hooks/use-api'
+import { Button } from '@/components/ui/button'
+import { toast } from '@/hooks/use-toast'
+import { useQueryClient } from 'react-query'
 import { cn, formatNumber, formatDateTime } from '@/lib/utils'
 
 interface Signal {
@@ -25,6 +28,18 @@ export function SignalsPage() {
   const q = new URLSearchParams({ min_confidence: String(minConf), limit: '100' })
   if (symbol) q.set('symbol', symbol.toUpperCase())
   const { data, isLoading, error } = useApi<Signal[]>(`/api/signals/?${q}`, 30000)
+  const qc = useQueryClient()
+  const execute = async (s: Signal) => {
+    const qty = window.prompt(`Jumlah untuk ${s.signal_type} ${s.symbol}${s.symbol.endsWith('.JK') ? ' (lembar, kelipatan 100)' : ''}:`)
+    if (!qty) return
+    try {
+      await postApi('/api/portfolio/execute-signal', { signal_id: s.id, quantity: parseFloat(qty) })
+      toast({ title: `Sinyal ${s.symbol} dieksekusi (paper trading)` })
+      qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith('/api/portfolio') })
+    } catch (e) {
+      toast({ title: 'Gagal mengeksekusi', description: (e as Error).message, variant: 'destructive' })
+    }
+  }
   const { data: perf } = useApi<{ overall: { total_signals: number; win_rate: number } }>('/api/signals/performance', 120000)
 
   return (
@@ -57,7 +72,7 @@ export function SignalsPage() {
           {data && data.length > 0 && (
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
-                <tr><th className="py-2">Simbol</th><th>Arah</th><th>Strategi</th><th className="w-40">Confidence</th><th className="text-right">Entry</th><th className="text-right">TP1</th><th className="text-right">SL</th><th className="text-right">R:R</th><th className="text-right">Waktu</th></tr>
+                <tr><th className="py-2">Simbol</th><th>Arah</th><th>Strategi</th><th className="w-40">Confidence</th><th className="text-right">Entry</th><th className="text-right">TP1</th><th className="text-right">SL</th><th className="text-right">R:R</th><th className="text-right">Waktu</th><th /></tr>
               </thead>
               <tbody>
                 {data.map((s) => {
@@ -78,6 +93,7 @@ export function SignalsPage() {
                       <td className="text-right tabular-nums text-red-500">{formatNumber(s.stop_loss)}</td>
                       <td className="text-right tabular-nums">{s.risk_reward_ratio?.toFixed(2) ?? '–'}</td>
                       <td className="text-right text-muted-foreground">{formatDateTime(s.generated_at)}</td>
+                      <td className="text-right"><Button size="sm" variant="outline" onClick={() => execute(s)}>Eksekusi</Button></td>
                     </tr>
                   )
                 })}

@@ -162,7 +162,7 @@ class SentimentStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="Sentiment_Analysis",
-                timeframe=TimeFrame.H4,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,

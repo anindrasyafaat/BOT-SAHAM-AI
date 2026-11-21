@@ -1,287 +1,111 @@
 """
-Portfolio Routes untuk Trading Command Center
-API endpoints untuk paper trading portfolio management
+Portfolio Routes untuk Trading Command Center (paper trading nyata, lihat paper/broker.py).
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Optional, Dict, Any
-from sqlalchemy.ext.asyncio import AsyncSession
-from database.connection import get_db_session
-from utils.logger import setup_logging
+from typing import Optional
 
-logger = setup_logging()
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database.connection import get_db_session
+from models.portfolio import Trade
+from models.signals import SignalType, TradingSignal
+from paper import broker
+
 router = APIRouter()
 
 
+def _mdm(request: Request):
+    mdm = getattr(request.app.state, "market_data_manager", None)
+    if mdm is None:
+        raise HTTPException(status_code=503, detail="Market data belum siap")
+    return mdm
+
+
+class ExecuteSignal(BaseModel):
+    signal_id: int
+    quantity: float = Field(gt=0)
+
+
+class Order(BaseModel):
+    symbol: str
+    quantity: Optional[float] = Field(default=None, gt=0)
+    stop_loss: Optional[float] = Field(default=None, gt=0)
+    take_profit: Optional[float] = Field(default=None, gt=0)
+
+
 @router.get("/")
-async def get_portfolio_summary(session: AsyncSession = Depends(get_db_session)):
-    """Get portfolio summary dan performance"""
-    try:
-        # Mock portfolio data untuk demo
-        portfolio_data = {
-            "total_value": 100000000,  # 100M IDR
-            "cash_balance": 25000000,  # 25M IDR
-            "total_invested": 75000000,  # 75M IDR
-            "total_pnl": 12500000,  # 12.5M IDR profit
-            "total_pnl_percent": 16.67,
-            "positions_count": 5,
-            "today_pnl": 850000,  # 850K IDR
-            "today_pnl_percent": 0.85
-        }
-        
-        return {
-            "status": "success",
-            "data": portfolio_data
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting portfolio summary: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def get_portfolio_summary(request: Request, session: AsyncSession = Depends(get_db_session)):
+    return {"status": "success", "data": await broker.summary(session, _mdm(request))}
 
 
 @router.get("/positions")
-async def get_positions(session: AsyncSession = Depends(get_db_session)):
-    """Get active positions"""
-    try:
-        # Mock positions data untuk demo
-        positions = [
-            {
-                "symbol": "BBCA.JK",
-                "name": "Bank Central Asia",
-                "quantity": 1000,
-                "avg_entry_price": 9500,
-                "current_price": 10250,
-                "market_value": 10250000,
-                "unrealized_pnl": 750000,
-                "unrealized_pnl_percent": 7.89,
-                "entry_date": "2024-01-15T10:00:00Z"
-            },
-            {
-                "symbol": "BBRI.JK",
-                "name": "Bank Rakyat Indonesia",
-                "quantity": 2000,
-                "avg_entry_price": 5200,
-                "current_price": 4850,
-                "market_value": 9700000,
-                "unrealized_pnl": -700000,
-                "unrealized_pnl_percent": -6.73,
-                "entry_date": "2024-01-20T14:30:00Z"
-            },
-            {
-                "symbol": "UNVR.JK",
-                "name": "Unilever Indonesia",
-                "quantity": 500,
-                "avg_entry_price": 4200,
-                "current_price": 4450,
-                "market_value": 2225000,
-                "unrealized_pnl": 125000,
-                "unrealized_pnl_percent": 5.95,
-                "entry_date": "2024-01-25T09:15:00Z"
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": positions,
-            "total": len(positions)
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting positions: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def get_positions(request: Request, session: AsyncSession = Depends(get_db_session)):
+    data = await broker.positions(session, _mdm(request))
+    return {"status": "success", "data": data, "total": len(data)}
 
 
 @router.get("/trades")
-async def get_trade_history(
-    limit: int = 50,
-    offset: int = 0,
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Get trade history"""
-    try:
-        # Mock trade history untuk demo
-        trades = [
-            {
-                "id": "TRD001",
-                "symbol": "BBCA.JK",
-                "side": "BUY",
-                "quantity": 1000,
-                "price": 9500,
-                "value": 9500000,
-                "fees": 47500,
-                "trade_date": "2024-01-15T10:00:00Z",
-                "signal_id": "SIG001"
-            },
-            {
-                "id": "TRD002",
-                "symbol": "TLKM.JK",
-                "side": "SELL",
-                "quantity": 500,
-                "price": 4800,
-                "value": 2400000,
-                "fees": 12000,
-                "trade_date": "2024-01-18T15:30:00Z",
-                "signal_id": "SIG002"
-            },
-            {
-                "id": "TRD003",
-                "symbol": "ASII.JK",
-                "side": "BUY",
-                "quantity": 1500,
-                "price": 7200,
-                "value": 10800000,
-                "fees": 54000,
-                "trade_date": "2024-01-22T11:45:00Z",
-                "signal_id": "SIG003"
-            }
-        ]
-        
-        # Apply pagination
-        paginated_trades = trades[offset:offset + limit]
-        
-        return {
-            "status": "success",
-            "data": paginated_trades,
-            "total": len(trades),
-            "limit": limit,
-            "offset": offset
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting trade history: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@router.get("/performance")
-async def get_portfolio_performance(session: AsyncSession = Depends(get_db_session)):
-    """Get portfolio performance metrics"""
-    try:
-        # Mock performance data untuk demo
-        performance = {
-            "total_return": 16.67,
-            "annualized_return": 22.45,
-            "volatility": 18.32,
-            "sharpe_ratio": 1.23,
-            "max_drawdown": -8.45,
-            "win_rate": 68.5,
-            "profit_factor": 1.85,
-            "avg_win": 1250000,
-            "avg_loss": -675000,
-            "total_trades": 47,
-            "best_trade": 2850000,
-            "worst_trade": -1200000,
-            "avg_holding_period": 8.5  # days
-        }
-        
-        return {
-            "status": "success",
-            "data": performance
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting portfolio performance: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def get_trade_history(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+                            session: AsyncSession = Depends(get_db_session)):
+    rows = (await session.execute(
+        select(Trade).order_by(desc(Trade.executed_at), desc(Trade.id)).offset(offset).limit(limit))).scalars()
+    data = [t.to_dict() for t in rows]
+    return {"status": "success", "data": data, "total": len(data)}
 
 
 @router.get("/equity-curve")
-async def get_equity_curve(session: AsyncSession = Depends(get_db_session)):
-    """Get equity curve data untuk charting"""
+async def get_equity_curve(request: Request, days: int = Query(90, ge=2, le=365),
+                           session: AsyncSession = Depends(get_db_session)):
+    mdm = _mdm(request)
+    curve = broker.equity_series(await broker._all_trades(session), mdm.history, mdm.to_idr, days)
+    return {"status": "success", "data": curve, "total_points": len(curve)}
+
+
+@router.get("/performance")
+async def get_portfolio_performance(request: Request, session: AsyncSession = Depends(get_db_session)):
+    mdm = _mdm(request)
+    trades = await broker._all_trades(session)
+    return {"status": "success",
+            "data": broker.performance(trades, broker.equity_series(trades, mdm.history, mdm.to_idr, 365))}
+
+
+@router.post("/buy")
+async def buy(order: Order, request: Request, session: AsyncSession = Depends(get_db_session)):
+    if order.quantity is None:
+        raise HTTPException(status_code=422, detail="quantity wajib")
     try:
-        # Mock equity curve data untuk demo
-        import datetime
-        
-        base_date = datetime.datetime.now() - datetime.timedelta(days=90)
-        equity_curve = []
-        
-        initial_value = 100000000  # 100M IDR
-        current_value = initial_value
-        
-        for i in range(90):
-            date = base_date + datetime.timedelta(days=i)
-            
-            # Simulate daily P&L dengan random walk
-            import random
-            daily_return = random.uniform(-0.02, 0.03)  # -2% to +3% daily
-            current_value *= (1 + daily_return)
-            
-            equity_curve.append({
-                "date": date.isoformat(),
-                "value": current_value,
-                "daily_return": daily_return * 100
-            })
-        
-        return {
-            "status": "success",
-            "data": equity_curve,
-            "total_points": len(equity_curve),
-            "initial_value": initial_value,
-            "final_value": current_value,
-            "total_return": ((current_value - initial_value) / initial_value) * 100
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting equity curve: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        t = await broker.buy(session, _mdm(request), order.symbol, order.quantity,
+                             stop_loss=order.stop_loss, take_profit=order.take_profit)
+    except broker.BrokerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "data": t.to_dict()}
 
 
 @router.post("/execute-signal")
-async def execute_signal(
-    signal_id: str,
-    quantity: int,
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Execute trading signal (paper trading)"""
+async def execute_signal(body: ExecuteSignal, request: Request, session: AsyncSession = Depends(get_db_session)):
+    sig = await session.get(TradingSignal, body.signal_id)
+    if sig is None:
+        raise HTTPException(status_code=404, detail="Sinyal tidak ditemukan")
     try:
-        # Mock execution untuk demo
-        execution_result = {
-            "trade_id": f"TRD{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            "signal_id": signal_id,
-            "status": "executed",
-            "quantity": quantity,
-            "executed_price": 10250,  # Mock price
-            "executed_value": quantity * 10250,
-            "fees": quantity * 10250 * 0.0015,  # 0.15% fees
-            "execution_time": datetime.now().isoformat()
-        }
-        
-        return {
-            "status": "success",
-            "message": "Signal executed successfully",
-            "data": execution_result
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error executing signal {signal_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        if sig.signal_type in (SignalType.BUY, SignalType.STRONG_BUY):
+            t = await broker.buy(session, _mdm(request), sig.symbol, body.quantity,
+                                 stop_loss=float(sig.stop_loss),
+                                 take_profit=float(sig.target_price_1) if sig.target_price_1 else None,
+                                 signal_id=sig.id, reason="signal")
+        else:  # tanpa short selling: sinyal jual menutup posisi yang ada
+            t = await broker.sell(session, _mdm(request), sig.symbol, body.quantity, reason="signal")
+    except broker.BrokerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "message": "Sinyal dieksekusi (paper trading)", "data": t.to_dict()}
 
 
 @router.post("/close-position")
-async def close_position(
-    symbol: str,
-    quantity: Optional[int] = None,
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Close position (sell all or partial)"""
+async def close_position(order: Order, request: Request, session: AsyncSession = Depends(get_db_session)):
     try:
-        # Mock closing untuk demo
-        closing_result = {
-            "trade_id": f"TRD{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            "symbol": symbol,
-            "side": "SELL",
-            "quantity": quantity or 1000,  # Mock quantity
-            "executed_price": 10500,  # Mock price
-            "executed_value": (quantity or 1000) * 10500,
-            "fees": (quantity or 1000) * 10500 * 0.0015,
-            "realized_pnl": 1250000,  # Mock profit
-            "execution_time": datetime.now().isoformat()
-        }
-        
-        return {
-            "status": "success",
-            "message": "Position closed successfully",
-            "data": closing_result
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error closing position for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        t = await broker.sell(session, _mdm(request), order.symbol, order.quantity)
+    except broker.BrokerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "message": "Posisi ditutup", "data": t.to_dict()}

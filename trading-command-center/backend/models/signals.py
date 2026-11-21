@@ -56,16 +56,16 @@ class TradingSignal(Base):
     confidence_score = Column(Numeric(5, 2), nullable=False)  # 0-100%
     
     # Price levels
-    entry_price = Column(Numeric(15, 4), nullable=False)
-    target_price_1 = Column(Numeric(15, 4), nullable=True)
-    target_price_2 = Column(Numeric(15, 4), nullable=True)
-    target_price_3 = Column(Numeric(15, 4), nullable=True)
-    stop_loss = Column(Numeric(15, 4), nullable=False)
+    entry_price = Column(Float, nullable=False)
+    target_price_1 = Column(Float, nullable=True)
+    target_price_2 = Column(Float, nullable=True)
+    target_price_3 = Column(Float, nullable=True)
+    stop_loss = Column(Float, nullable=False)
     
     # Risk metrics
     risk_reward_ratio = Column(Numeric(8, 4), nullable=True)
-    position_size = Column(Numeric(15, 4), nullable=True)
-    max_loss = Column(Numeric(15, 4), nullable=True)
+    position_size = Column(Float, nullable=True)
+    max_loss = Column(Float, nullable=True)
     
     # Analysis
     technical_analysis = Column(Text, nullable=True)
@@ -80,7 +80,7 @@ class TradingSignal(Base):
     # Performance tracking
     executed_at = Column(DateTime, nullable=True)
     closed_at = Column(DateTime, nullable=True)
-    pnl_amount = Column(Numeric(15, 4), nullable=True)
+    pnl_amount = Column(Float, nullable=True)
     pnl_percent = Column(Numeric(8, 4), nullable=True)
     
     # Validation

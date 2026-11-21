@@ -8,7 +8,6 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import uvicorn
 
@@ -49,11 +48,14 @@ async def lifespan(app: FastAPI):
         
         # Initialize WebSocket manager
         websocket_manager = ConnectionManager()
+        from notifications.manager import NotificationManager
+        NotificationManager.websocket_manager = websocket_manager
         logger.info("✅ WebSocket manager initialized")
         
         # Initialize market data manager
         market_data_manager = MarketDataManager(websocket_manager)
         await market_data_manager.start()
+        app.state.market_data_manager = market_data_manager
         logger.info("✅ Market data manager started")
         
         # Initialize signal generator
@@ -105,8 +107,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static files untuk logs dan data
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # Root endpoint
@@ -154,7 +154,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 symbol = data.get("symbol")
                 signals = await signal_generator.get_signals(symbol)
                 
-                await websocket.send_json({
+                await websocket_manager.send_personal_message(websocket, {
                     "type": "signals",
                     "symbol": symbol,
                     "data": signals
@@ -186,25 +186,30 @@ async def global_exception_handler(request, exc):
         status_code=500,
         content={
             "error": "Internal server error",
-            "message": str(exc),
+            "message": str(exc) if settings.debug else "Terjadi kesalahan di server",
             "path": str(request.url)
         }
     )
 
 
-# Health check endpoint
+# Health check endpoint (status nyata layanan internal)
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
+    from datetime import datetime
+    mdm = market_data_manager
+    ready = bool(mdm and mdm.market_data_cache)
     return {
-        "status": "healthy",
-        "timestamp": "2024-01-01T00:00:00Z",
+        "status": "healthy" if ready else "starting",
+        "timestamp": datetime.now().isoformat(),
         "services": {
-            "database": "connected",
-            "redis": "connected",
-            "market_data": "running",
-            "signals": "running"
-        }
+            "market_data": {
+                "symbols": len(mdm.market_data_cache) if mdm else 0,
+                "last_refresh": mdm.last_refresh.isoformat() if mdm and mdm.last_refresh else None,
+                "last_error": mdm.last_error if mdm else None,
+            },
+            "signals": "running" if signal_generator and signal_generator.running else "stopped",
+            "websocket": websocket_manager.get_connection_stats() if websocket_manager else None,
+        },
     }
 
 

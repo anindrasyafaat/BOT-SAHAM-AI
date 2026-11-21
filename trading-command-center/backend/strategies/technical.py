@@ -6,7 +6,7 @@ Implementasi 8 strategi technical analysis otomatis
 import pandas as pd
 import numpy as np
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from models.signals import TradingSignal, SignalType, TimeFrame
 from .base import BaseStrategy
@@ -135,7 +135,7 @@ class TechnicalStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="EMA_Crossover",
-                timeframe=TimeFrame.H1,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,
@@ -203,7 +203,7 @@ class TechnicalStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="SuperTrend_RSI",
-                timeframe=TimeFrame.H4,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,
@@ -223,9 +223,10 @@ class TechnicalStrategy(BaseStrategy):
         try:
             # Calculate Bollinger Bands
             bb = ta.bbands(df['close_price'], length=20, std=2)
-            df['BB_Upper'] = bb['BBU_20_2.0']
-            df['BB_Lower'] = bb['BBL_20_2.0']
-            df['BB_Middle'] = bb['BBM_20_2.0']
+            # urutan kolom bbands stabil (L, M, U) di pandas-ta 0.3 & 0.4, namanya tidak
+            df['BB_Upper'] = bb.iloc[:, 2]
+            df['BB_Lower'] = bb.iloc[:, 0]
+            df['BB_Middle'] = bb.iloc[:, 1]
             df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
             
             # Calculate MACD
@@ -280,7 +281,7 @@ class TechnicalStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="Bollinger_MACD",
-                timeframe=TimeFrame.H1,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,
@@ -299,7 +300,9 @@ class TechnicalStrategy(BaseStrategy):
         """VWAP dengan Order Block (ICT Concept)"""
         try:
             # Calculate VWAP
-            df['VWAP'] = ta.vwap(df['high_price'], df['low_price'], df['close_price'], df['volume'])
+            # VWAP bergulir 20 candle: ta.vwap berjangkar harian sehingga tak bermakna di candle harian
+            tp = (df['high_price'] + df['low_price'] + df['close_price']) / 3
+            df['VWAP'] = (tp * df['volume']).rolling(20).sum() / df['volume'].rolling(20).sum()
             
             # Calculate order blocks (simplified)
             df['OrderBlock_High'] = df['high_price'].rolling(5).max()
@@ -311,8 +314,8 @@ class TechnicalStrategy(BaseStrategy):
             ob_low = df['OrderBlock_Low'].iloc[-1]
             
             # Check conditions
-            bullish_condition = (current_price > vwap) and (current_price <= ob_low * 1.02)
-            bearish_condition = (current_price < vwap) and (current_price >= ob_high * 0.98)
+            bullish_condition = (current_price > vwap_current) and (current_price <= ob_low * 1.02)
+            bearish_condition = (current_price < vwap_current) and (current_price >= ob_high * 0.98)
             
             if not (bullish_condition or bearish_condition):
                 return None
@@ -331,12 +334,13 @@ class TechnicalStrategy(BaseStrategy):
             # Calculate levels
             entry_price = current_price
             
+            # target 2R dari risiko ke stop (rumus lama berbasis VWAP bisa menaruh target di sisi yang salah)
             if bullish_condition:
                 stop_loss = ob_low * 0.99
-                target_price_1 = vwap + (vwap - ob_low) * 2
+                target_price_1 = current_price + 2 * (current_price - stop_loss)
             else:
                 stop_loss = ob_high * 1.01
-                target_price_1 = vwap - (ob_high - vwap) * 2
+                target_price_1 = current_price - 2 * (stop_loss - current_price)
                 
             # Risk/Reward
             risk = abs(entry_price - stop_loss)
@@ -352,7 +356,7 @@ class TechnicalStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="VWAP_OrderBlock",
-                timeframe=TimeFrame.H1,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,
@@ -474,7 +478,7 @@ class TechnicalStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="Mean_Reversion",
-                timeframe=TimeFrame.H4,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,
@@ -544,7 +548,7 @@ class TechnicalStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="Liquidity_Sweep",
-                timeframe=TimeFrame.H1,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,
@@ -631,11 +635,12 @@ class TechnicalStrategy(BaseStrategy):
         try:
             # Calculate Heikin-Ashi candles
             df['HA_Close'] = (df['open_price'] + df['high_price'] + df['low_price'] + df['close_price']) / 4
-            df['HA_Open'] = (df['open_price'].shift(1) + df['close_price'].shift(1)) / 2
-            df['HA_Open'].iloc[0] = (df['open_price'].iloc[0] + df['close_price'].iloc[0]) / 2
-            
+            ha_close = df['HA_Close'].to_numpy()
+            ha_open_arr = np.empty(len(df))
+            ha_open_arr[0] = (df['open_price'].iloc[0] + df['close_price'].iloc[0]) / 2
             for i in range(1, len(df)):
-                df['HA_Open'].iloc[i] = (df['HA_Open'].iloc[i-1] + df['HA_Close'].iloc[i-1]) / 2
+                ha_open_arr[i] = (ha_open_arr[i-1] + ha_close[i-1]) / 2
+            df['HA_Open'] = ha_open_arr
                 
             df['HA_High'] = df[['high_price', 'HA_Open', 'HA_Close']].max(axis=1)
             df['HA_Low'] = df[['low_price', 'HA_Open', 'HA_Close']].min(axis=1)
@@ -685,7 +690,7 @@ class TechnicalStrategy(BaseStrategy):
                 symbol=symbol,
                 signal_type=signal_type,
                 strategy_name="Heikin_Ashi",
-                timeframe=TimeFrame.H1,
+                timeframe=TimeFrame.D1,
                 confidence_score=confidence,
                 entry_price=entry_price,
                 target_price_1=target_price_1,

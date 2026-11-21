@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { io, Socket } from 'socket.io-client'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { useQueryClient } from 'react-query'
+import { toast } from './use-toast'
 
+// Protokol backend (FastAPI WebSocket /ws): JSON {type, data|signal, symbol?}; klien kirim {type: 'subscribe', channel, symbol?}.
 interface WebSocketMessage {
   type: string
   data: any
@@ -15,149 +17,92 @@ interface WebSocketState {
 }
 
 interface UseWebSocketReturn {
-  socket: Socket | null
+  socket: WebSocket | null
   state: WebSocketState
   subscribe: (channel: string, symbol?: string) => void
   unsubscribe: (channel: string, symbol?: string) => void
   sendMessage: (message: any) => void
 }
 
+const MAX_MESSAGES = 100
+const wsUrl = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+
 export function useWebSocket(): UseWebSocketReturn {
-  const [socket, setSocket] = useState<Socket | null>(null)
-  const [state, setState] = useState<WebSocketState>({
-    isConnected: false,
-    messages: [],
-    error: null
-  })
-  const messageBuffer = useRef<WebSocketMessage[]>([])
+  const qc = useQueryClient()
+  const [socket, setSocket] = useState<WebSocket | null>(null)
+  const [state, setState] = useState<WebSocketState>({ isConnected: false, messages: [], error: null })
+  const buffer = useRef<WebSocketMessage[]>([])
 
   useEffect(() => {
-    // Initialize WebSocket connection
-    const ws = io('ws://localhost:8000', {
-      transports: ['websocket'],
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-    })
+    let ws: WebSocket
+    let retry = 0
+    let timer: ReturnType<typeof setTimeout>
+    let closed = false
 
-    ws.on('connect', () => {
-      console.log('✅ WebSocket connected')
-      setState(prev => ({ ...prev, isConnected: true, error: null }))
-      
-      // Subscribe to default channels
-      ws.emit('subscribe', { type: 'subscribe', channel: 'market_data' })
-      ws.emit('subscribe', { type: 'subscribe', channel: 'signals' })
-    })
-
-    ws.on('disconnect', (reason) => {
-      console.log('🔌 WebSocket disconnected:', reason)
-      setState(prev => ({ ...prev, isConnected: false }))
-    })
-
-    ws.on('connect_error', (error) => {
-      console.error('❌ WebSocket connection error:', error)
-      setState(prev => ({ ...prev, error: error.message }))
-    })
-
-    ws.on('message', (message: WebSocketMessage) => {
-      console.log('📡 WebSocket message received:', message.type)
-      
-      // Add to buffer dan state
-      messageBuffer.current.push(message)
-      
-      // Keep only last 100 messages
-      if (messageBuffer.current.length > 100) {
-        messageBuffer.current = messageBuffer.current.slice(-100)
+    const connect = () => {
+      ws = new WebSocket(wsUrl())
+      setSocket(ws)
+      ws.onopen = () => {
+        retry = 0
+        setState((p) => ({ ...p, isConnected: true, error: null }))
+        for (const channel of ['market_data', 'signals']) ws.send(JSON.stringify({ type: 'subscribe', channel }))
       }
-      
-      setState(prev => ({ ...prev, messages: messageBuffer.current }))
-    })
-
-    ws.on('market_update', (data) => {
-      setState(prev => ({ 
-        ...prev, 
-        messages: [...prev.messages, { type: 'market_update', data }] 
-      }))
-    })
-
-    ws.on('new_signal', (data) => {
-      setState(prev => ({ 
-        ...prev, 
-        messages: [...prev.messages, { type: 'new_signal', data }] 
-      }))
-    })
-
-    ws.on('market_summary', (data) => {
-      setState(prev => ({ 
-        ...prev, 
-        messages: [...prev.messages, { type: 'market_summary', data }] 
-      }))
-    })
-
-    setSocket(ws)
-
-    // Cleanup
+      ws.onclose = () => {
+        setState((p) => ({ ...p, isConnected: false }))
+        if (!closed) timer = setTimeout(connect, Math.min(30000, 1000 * 2 ** retry++)) // backoff
+      }
+      ws.onerror = () => setState((p) => ({ ...p, error: 'Koneksi realtime gagal' }))
+      ws.onmessage = (ev) => {
+        let raw: any
+        try {
+          raw = JSON.parse(ev.data)
+        } catch {
+          return
+        }
+        const msg: WebSocketMessage = { ...raw, data: raw.data ?? raw.signal }
+        if (msg.type === 'new_signal') {
+          qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith('/api/signals') })
+          toast({ title: `Sinyal ${msg.data?.signal_type} ${msg.data?.symbol}`, description: `${msg.data?.strategy_name} · confidence ${Math.round(msg.data?.confidence_score ?? 0)}%` })
+        } else if (msg.type === 'brain_update') {
+          qc.invalidateQueries(['/api/signals/brain'])
+          toast({ title: `AI Brain: ${msg.data?.strategy}`, description: msg.data?.reason })
+        } else if (msg.type === 'notification') {
+          toast({ title: msg.data?.title, description: msg.data?.message })
+        }
+        buffer.current = [...buffer.current, msg].slice(-MAX_MESSAGES)
+        setState((p) => ({ ...p, messages: buffer.current }))
+      }
+    }
+    connect()
     return () => {
-      if (ws) {
-        ws.disconnect()
-      }
+      closed = true
+      clearTimeout(timer)
+      ws?.close()
     }
-  }, [])
+  }, [qc])
 
-  const subscribe = useCallback((channel: string, symbol?: string) => {
-    if (socket) {
-      socket.emit('subscribe', { 
-        type: 'subscribe', 
-        channel, 
-        symbol 
-      })
-    }
-  }, [socket])
-
-  const unsubscribe = useCallback((channel: string, symbol?: string) => {
-    if (socket) {
-      socket.emit('unsubscribe', { 
-        type: 'unsubscribe', 
-        channel, 
-        symbol 
-      })
-    }
-  }, [socket])
-
-  const sendMessage = useCallback((message: any) => {
-    if (socket) {
-      socket.emit('message', message)
-    }
+  const send = useCallback((message: any) => {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
   }, [socket])
 
   return {
     socket,
     state,
-    subscribe,
-    unsubscribe,
-    sendMessage
+    subscribe: useCallback((channel: string, symbol?: string) => send({ type: 'subscribe', channel, symbol }), [send]),
+    unsubscribe: useCallback((channel: string, symbol?: string) => send({ type: 'unsubscribe', channel, symbol }), [send]),
+    sendMessage: send,
   }
 }
-
-// WebSocket Provider untuk React Context
-import { createContext, useContext } from 'react'
 
 const WebSocketContext = createContext<UseWebSocketReturn | undefined>(undefined)
 
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const websocket = useWebSocket()
-  
-  return (
-    <WebSocketContext.Provider value={websocket}>
-      {children}
-    </WebSocketContext.Provider>
-  )
+  return <WebSocketContext.Provider value={websocket}>{children}</WebSocketContext.Provider>
 }
 
 export function useWebSocketContext() {
   const context = useContext(WebSocketContext)
-  if (!context) {
-    throw new Error('useWebSocketContext must be used within WebSocketProvider')
-  }
+  if (!context) throw new Error('useWebSocketContext must be used within WebSocketProvider')
   return context
 }

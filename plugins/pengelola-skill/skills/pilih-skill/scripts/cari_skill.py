@@ -282,4 +282,7 @@ def main():
 
 
 if __name__ == "__main__":
+    import signal
+    if hasattr(signal, "SIGPIPE"):  # keluar diam-diam saat output di-pipe ke `head`
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     main()

@@ -216,6 +216,7 @@ async def toggle_strategy(
         # Toggle enabled status
         strategy.enabled = not strategy.enabled
         await session.commit()
+        await session.refresh(strategy)  # updated_at di-expire oleh onupdate; muat ulang secara async
         gen = getattr(request.app.state, "signal_generator", None)
         if gen:
             gen.strategy_configs[strategy_name] = strategy.to_dict()

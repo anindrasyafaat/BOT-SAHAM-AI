@@ -15,10 +15,7 @@ interface EconomicEvent {
 }
 
 interface EconomicCalendarProps {
-  data: {
-    data: EconomicEvent[]
-    date: string
-  }
+  data: EconomicEvent[]
   className?: string
 }
 
@@ -52,7 +49,7 @@ export function EconomicCalendar({ data, className }: EconomicCalendarProps) {
   return (
     <div className={className}>
       <div className="space-y-3 max-h-64 overflow-y-auto">
-        {data.data.map((event, index) => (
+        {data.map((event, index) => (
           <div 
             key={index} 
             className="p-3 rounded-lg border bg-card hover:bg-accent/50 transition-colors cursor-pointer"
@@ -93,10 +90,10 @@ export function EconomicCalendar({ data, className }: EconomicCalendarProps) {
         ))}
       </div>
       
-      {data.data.length === 0 && (
+      {data.length === 0 && (
         <div className="text-center py-8 text-muted-foreground">
           <Calendar className="h-8 w-8 mx-auto mb-2 opacity-50" />
-          <p>No economic events scheduled</p>
+          <p>Kalender ekonomi belum terhubung ke sumber data</p>
         </div>
       )}
     </div>

@@ -3,7 +3,9 @@ Market Data Routes untuk Trading Command Center
 API endpoints untuk market data dan real-time updates
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from collections import defaultdict
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.connection import get_db_session
@@ -17,7 +19,7 @@ router = APIRouter()
 
 
 @router.get("/symbols")
-async def get_supported_symbols():
+async def list_supported_symbols():
     """Get semua symbols yang didukung"""
     try:
         symbols = get_supported_symbols()
@@ -193,7 +195,7 @@ async def get_sector_performance():
 
 @router.get("/heatmap")
 async def get_market_heatmap(
-    market_type: str = Query(default="all", regex="^(all|indonesia|us|crypto)$")
+    market_type: str = Query(default="all", pattern="^(all|indonesia|us|crypto)$")
 ):
     """Get market heatmap data"""
     try:
@@ -223,7 +225,7 @@ async def get_market_heatmap(
                 'change_percent': change_percent,
                 'volume': data.get('volume', 0),
                 'market_cap': data.get('market_cap', 0),
-                'color': await self._get_heatmap_color(change_percent)
+                'color': _get_heatmap_color(change_percent)
             })
             
         # Sort by change percent
@@ -247,7 +249,7 @@ async def get_market_heatmap(
 @router.get("/top-movers")
 async def get_top_movers(
     limit: int = Query(default=10, ge=1, le=50),
-    market_type: str = Query(default="all", regex="^(all|indonesia|us|crypto)$")
+    market_type: str = Query(default="all", pattern="^(all|indonesia|us|crypto)$")
 ):
     """Get top gainers dan losers"""
     try:
@@ -335,7 +337,7 @@ async def get_top_movers(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-async def _get_heatmap_color(self, change_percent: float) -> str:
+def _get_heatmap_color(change_percent: float) -> str:
     """Get heatmap color berdasarkan change percent"""
     try:
         if change_percent >= 5:
@@ -360,99 +362,53 @@ async def _get_heatmap_color(self, change_percent: float) -> str:
         return "#808080"  # Gray for error
 
 
+def fear_greed(quotes: dict, history: dict) -> Optional[dict]:
+    """Indeks Fear & Greed internal (0-100) dari semesta simbol yang dipantau."""
+    if not quotes:
+        return None
+    clamp = lambda v: int(max(0, min(100, round(v))))
+    breadth = 100 * sum(q["change_percent"] > 0 for q in quotes.values()) / len(quotes)
+    above_ma50 = highs = lows = n_hist = 0
+    vol_ratios = []
+    for sym, df in history.items():
+        c = df["Close"]
+        if len(c) < 60:
+            continue
+        n_hist += 1
+        above_ma50 += c.iloc[-1] > c.tail(50).mean()
+        hi, lo = df["High"].tail(252).max(), df["Low"].tail(252).min()
+        highs += c.iloc[-1] >= hi * 0.95
+        lows += c.iloc[-1] <= lo * 1.05
+        r = c.pct_change()
+        long_vol = r.tail(252).std()
+        if long_vol and long_vol == long_vol:
+            vol_ratios.append(r.tail(20).std() / long_vol)
+    if not n_hist:
+        return None
+    components = {
+        "market_breadth": clamp(breadth),
+        "price_momentum": clamp(100 * above_ma50 / n_hist),
+        "price_strength": clamp(50 + 50 * (highs - lows) / n_hist),
+        "market_volatility": clamp(50 - 100 * (sum(vol_ratios) / len(vol_ratios) - 1)) if vol_ratios else 50,
+    }
+    value = clamp(sum(components.values()) / len(components))
+    sentiment = ("Extreme Greed" if value >= 75 else "Greed" if value >= 55 else "Neutral" if value >= 45
+                 else "Fear" if value >= 25 else "Extreme Fear")
+    return {"value": value, "sentiment": sentiment, "components": components,
+            "symbols": n_hist, "timestamp": datetime.now().isoformat()}
+
+
 @router.get("/economic-calendar")
 async def get_economic_calendar():
-    """Get economic calendar events"""
-    try:
-        # Mock economic calendar data (dalam production, integrate dengan API)
-        today = datetime.now().date()
-        events = [
-            {
-                "date": today.isoformat(),
-                "time": "08:30",
-                "currency": "USD",
-                "event": "Non-Farm Payrolls",
-                "impact": "High",
-                "actual": "",
-                "forecast": "180K",
-                "previous": "150K"
-            },
-            {
-                "date": today.isoformat(),
-                "time": "10:00",
-                "currency": "USD",
-                "event": "ISM Manufacturing PMI",
-                "impact": "High",
-                "actual": "",
-                "forecast": "48.5",
-                "previous": "47.6"
-            },
-            {
-                "date": today.isoformat(),
-                "time": "14:00",
-                "currency": "USD",
-                "event": "Fed Chair Powell Speech",
-                "impact": "High",
-                "actual": "",
-                "forecast": "",
-                "previous": ""
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": events,
-            "total_events": len(events),
-            "date": today.isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting economic calendar: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    """Belum ada sumber kalender ekonomi gratis yang terhubung; kembalikan kosong, bukan data karangan."""
+    return {"status": "success", "data": [], "source": None,
+            "message": "Kalender ekonomi belum terhubung ke sumber data"}
 
 
 @router.get("/fear-greed-index")
-async def get_fear_greed_index():
-    """Get Fear & Greed Index"""
-    try:
-        # Mock Fear & Greed Index (dalam production, hit actual API)
-        current_value = 65  # Neutral ke Fearful
-        
-        # Determine sentiment
-        if current_value >= 75:
-            sentiment = "Extreme Greed"
-            color = "#ff4444"
-        elif current_value >= 55:
-            sentiment = "Greed"
-            color = "#ff8844"
-        elif current_value >= 45:
-            sentiment = "Neutral"
-            color = "#ffff44"
-        elif current_value >= 25:
-            sentiment = "Fear"
-            color = "#44ff44"
-        else:
-            sentiment = "Extreme Fear"
-            color = "#44ffff"
-            
-        return {
-            "status": "success",
-            "data": {
-                "value": current_value,
-                "sentiment": sentiment,
-                "color": color,
-                "timestamp": datetime.now().isoformat(),
-                "components": {
-                    "stock_price_strength": 70,
-                    "stock_price_momentum": 60,
-                    "market_volatility": 55,
-                    "put_call_ratio": 65,
-                    "junk_bond_demand": 75,
-                    "safe_haven_demand": 45
-                }
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting Fear & Greed Index: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def get_fear_greed_index(request: Request):
+    mdm = getattr(request.app.state, "market_data_manager", None)
+    data = fear_greed(mdm.get_all_market_data(), mdm.history) if mdm else None
+    if data is None:
+        raise HTTPException(status_code=503, detail="Data pasar belum siap")
+    return {"status": "success", "data": data}

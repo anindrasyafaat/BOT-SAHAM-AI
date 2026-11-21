@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
+import { useApi } from '@/hooks/use-api'
 import { formatCurrency, formatPercentage, formatNumber } from '@/lib/utils'
 import { 
   useMarketData, 
@@ -46,6 +47,7 @@ export function DashboardPage() {
   const { data: heatmapData } = useMarketHeatmap(selectedMarket)
   const { data: fearGreedData } = useFearGreedIndex()
   const { data: economicData } = useEconomicCalendar()
+  const { data: recentSignals } = useApi<any[]>('/api/signals/?limit=5', 30000)
 
   // Real-time connection status
   const isConnected = wsState.isConnected
@@ -174,30 +176,18 @@ export function DashboardPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                {wsState.messages
-                  .filter(msg => msg.type === 'new_signal')
-                  .slice(0, 5)
-                  .map((msg, index) => {
-                    const signal = msg.data?.signal
-                    if (!signal) return null
-                    
-                    return (
-                      <div key={index} className="flex items-center justify-between p-3 rounded-lg bg-accent/50">
-                        <div>
-                          <div className="font-medium">{signal.symbol}</div>
-                          <div className="text-sm text-muted-foreground">
-                            {signal.strategy_name}
-                          </div>
-                        </div>
-                        <Badge 
-                          variant={signal.signal_type === 'BUY' ? 'default' : 'destructive'}
-                          className="ml-2"
-                        >
-                          {signal.signal_type}
-                        </Badge>
-                      </div>
-                    )
-                  })}
+                {(recentSignals ?? []).map((signal: any) => (
+                  <div key={signal.id} className="flex items-center justify-between p-3 rounded-lg bg-accent/50">
+                    <div>
+                      <div className="font-medium">{signal.symbol}</div>
+                      <div className="text-sm text-muted-foreground">{signal.strategy_name}</div>
+                    </div>
+                    <Badge variant={String(signal.signal_type).includes('BUY') ? 'default' : 'destructive'} className="ml-2">
+                      {signal.signal_type}
+                    </Badge>
+                  </div>
+                ))}
+                {recentSignals?.length === 0 && <p className="text-sm text-muted-foreground">Belum ada sinyal aktif.</p>}
                 
                 {wsState.messages.filter(msg => msg.type === 'new_signal').length === 0 && (
                   <div className="text-center text-muted-foreground py-8">

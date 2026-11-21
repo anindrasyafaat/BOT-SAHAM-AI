@@ -4,12 +4,11 @@ Mengelola pengambilan dan distribusi real-time market data
 """
 
 import asyncio
-import json
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+from datetime import datetime
+import math
+import pandas as pd
 import yfinance as yf
-import ccxt.pro as ccxt
-from sqlalchemy.ext.asyncio import AsyncSession
 from database.connection import AsyncSessionLocal
 from models.market_data import MarketData, MarketSummary, SectorPerformance
 from config import settings, get_supported_symbols
@@ -17,253 +16,182 @@ from utils.logger import setup_logging
 
 logger = setup_logging()
 
+HISTORY_PERIOD = "1y"          # cukup untuk EMA/MACD/BB/SMA200 harian
+FUNDAMENTAL_REFRESH = 6 * 3600
+FX_SYMBOL = "USDIDR=X"  # ticker.info lambat & dibatasi rate, cukup beberapa kali sehari
+
+
+def yahoo_symbol(symbol: str) -> str:
+    """BTCUSDT -> BTC-USD (Yahoo); saham tetap."""
+    return symbol[:-4] + "-USD" if symbol.endswith("USDT") else symbol
+
+
+def _num(v):
+    try:
+        f = float(v)
+        return None if math.isnan(f) or math.isinf(f) else f
+    except (TypeError, ValueError):
+        return None
+
 
 class MarketDataManager:
-    """Manager untuk market data real-time"""
-    
+    """Manager market data: satu unduhan batch Yahoo per siklus untuk saham IDX, AS, dan kripto."""
+
     def __init__(self, websocket_manager):
         self.websocket_manager = websocket_manager
         self.running = False
-        self.update_interval = settings.update_interval
-        self.symbols = get_supported_symbols()
-        
-        # Data storage
+        # Unduhan batch ~150 simbol butuh puluhan detik; jangan lebih sering dari 60 detik.
+        self.update_interval = max(settings.update_interval, 60)
+        self.symbols = {k: list(dict.fromkeys(v)) for k, v in get_supported_symbols().items()}
+        self.market_type_of = {s: k for k, v in self.symbols.items() for s in v}
+
         self.market_data_cache: Dict[str, Dict] = {}
-        self.crypto_exchange = None
-        
-        # Rate limiting
-        self.last_update: Dict[str, datetime] = {}
-        self.min_update_interval = 5  # seconds
-        
+        self.history: Dict[str, pd.DataFrame] = {}
+        self.fundamentals: Dict[str, Dict] = {}
+        self.usd_idr: Optional[float] = None
+        self.last_refresh: Optional[datetime] = None
+        self.last_error: Optional[str] = None
+        self._tasks: List[asyncio.Task] = []
+
     async def start(self):
-        """Start market data manager"""
         logger.info("🚀 Starting Market Data Manager...")
-        
         self.running = True
-        
-        # Initialize crypto exchange
-        try:
-            self.crypto_exchange = ccxt.binance({
-                'apiKey': '',
-                'secret': '',
-                'enableRateLimit': True,
-                'options': {
-                    'defaultType': 'spot',
-                },
-            })
-            logger.info("✅ Crypto exchange initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize crypto exchange: {e}")
-        
-        # Start background tasks
-        asyncio.create_task(self._update_loop())
-        asyncio.create_task(self._market_summary_loop())
-        
+        self._tasks = [
+            asyncio.create_task(self._update_loop()),
+            asyncio.create_task(self._fundamental_loop()),
+            asyncio.create_task(self._market_summary_loop()),
+        ]
         logger.info("✅ Market Data Manager started")
-        
+
     async def stop(self):
-        """Stop market data manager"""
         logger.info("🛑 Stopping Market Data Manager...")
-        
         self.running = False
-        
-        if self.crypto_exchange:
-            await self.crypto_exchange.close()
-            
+        for t in self._tasks:
+            t.cancel()
         logger.info("✅ Market Data Manager stopped")
-        
+
     async def _update_loop(self):
-        """Main update loop untuk market data"""
         while self.running:
             try:
-                # Update stock data
-                await self._update_stock_data()
-                
-                # Update crypto data
-                await self._update_crypto_data()
-                
-                # Wait for next update
-                await asyncio.sleep(self.update_interval)
-                
+                await self.refresh()
             except Exception as e:
+                self.last_error = str(e)
                 logger.error(f"❌ Error in update loop: {e}")
-                await asyncio.sleep(10)  # Wait before retrying
-                
-    async def _update_stock_data(self):
-        """Update stock market data"""
+            await asyncio.sleep(self.update_interval)
+
+    def _download(self) -> Dict[str, pd.DataFrame]:
+        symbols = list(self.market_type_of)
+        raw = yf.download(
+            [yahoo_symbol(s) for s in symbols] + [FX_SYMBOL], period=HISTORY_PERIOD, interval="1d",
+            group_by="ticker", auto_adjust=False, threads=True, progress=False,
+        )
+        frames = {}
+        for s in symbols:
+            try:
+                df = raw[yahoo_symbol(s)].dropna(subset=["Close"])
+            except KeyError:
+                continue
+            if len(df) >= 2:
+                frames[s] = df
         try:
-            # Update Indonesia stocks
-            for symbol in self.symbols["indonesia"]:
-                await self._update_yahoo_stock(symbol)
-                
-            # Update US stocks
-            for symbol in self.symbols["us"]:
-                await self._update_yahoo_stock(symbol)
-                
-        except Exception as e:
-            logger.error(f"❌ Error updating stock data: {e}")
-            
-    async def _update_crypto_data(self):
-        """Update crypto market data"""
-        try:
-            if not self.crypto_exchange:
-                return
-                
-            for symbol in self.symbols["crypto"]:
-                await self._update_crypto_price(symbol)
-                
-        except Exception as e:
-            logger.error(f"❌ Error updating crypto data: {e}")
-            
-    async def _update_yahoo_stock(self, symbol: str):
-        """Update stock data dari Yahoo Finance"""
-        try:
-            # Check rate limiting
-            now = datetime.now()
-            if symbol in self.last_update:
-                if (now - self.last_update[symbol]).total_seconds() < self.min_update_interval:
+            self.usd_idr = float(raw[FX_SYMBOL]["Close"].dropna().iloc[-1])
+        except (KeyError, IndexError):
+            logger.warning("⚠️ Kurs USD/IDR tidak tersedia; nilai aset USD belum dikonversi")
+        return frames
+
+    async def refresh(self):
+        """Ambil candle terbaru semua simbol lalu perbarui cache, DB, dan WebSocket."""
+        frames = await asyncio.to_thread(self._download)
+        if not frames:
+            raise RuntimeError("Yahoo Finance tidak mengembalikan data (cek koneksi/ rate limit)")
+        rows = []
+        for symbol, df in frames.items():
+            self.history[symbol] = df
+            data = self._quote(symbol, df)
+            self.market_data_cache[symbol] = data
+            rows.append(data)
+            await self.websocket_manager.broadcast(
+                {"type": "market_update", "symbol": symbol, "data": data}, channel="market_data"
+            )
+        await self._save_market_data_batch(rows)
+        from notifications.manager import NotificationManager
+        await NotificationManager().check_price_alerts(self.market_data_cache)
+        from paper.broker import check_exits
+        await check_exits(self)
+        self.last_refresh, self.last_error = datetime.now(), None
+        logger.info(f"📈 Market data refreshed: {len(frames)}/{len(self.market_type_of)} symbols")
+
+    def _quote(self, symbol: str, df: pd.DataFrame) -> dict:
+        last, prev = df.iloc[-1], df.iloc[-2]
+        price, prev_close = float(last["Close"]), float(prev["Close"])
+        info = self.fundamentals.get(symbol, {})
+        crypto = self.market_type_of.get(symbol) == "crypto"
+        year = df.tail(252)
+        change = price - prev_close
+        return {
+            "symbol": symbol,
+            "name": info.get("name") or symbol,
+            "current_price": price,
+            "open_price": float(last["Open"]),
+            "high_price": float(last["High"]),
+            "low_price": float(last["Low"]),
+            "close_price": prev_close,
+            "volume": _num(last["Volume"]) or 0.0,
+            "volume_avg": _num(df["Volume"].tail(20).mean()),
+            "market_cap": info.get("market_cap"),
+            "pe_ratio": info.get("pe_ratio"),
+            "pb_ratio": info.get("pb_ratio"),
+            "dividend_yield": info.get("dividend_yield"),
+            "change_amount": change,
+            "change_percent": change / prev_close * 100 if prev_close else 0.0,
+            "market_type": "crypto" if crypto else "stock",
+            "exchange": info.get("exchange") or ("CRYPTO" if crypto else ("IDX" if symbol.endswith(".JK") else "US")),
+            "currency": info.get("currency") or ("USD" if crypto or not symbol.endswith(".JK") else "IDR"),
+            "day_high": float(last["High"]),
+            "day_low": float(last["Low"]),
+            "fifty_two_week_high": float(year["High"].max()),
+            "fifty_two_week_low": float(year["Low"].min()),
+            "timestamp": datetime.now(),
+        }
+
+    def _fetch_fundamental(self, symbol: str) -> dict:
+        info = yf.Ticker(yahoo_symbol(symbol)).info or {}
+        return {
+            "name": info.get("longName") or info.get("shortName"),
+            "market_cap": _num(info.get("marketCap")),
+            "pe_ratio": _num(info.get("trailingPE")),
+            "pb_ratio": _num(info.get("priceToBook")),
+            "dividend_yield": _num(info.get("dividendYield")),
+            "exchange": info.get("exchange"),
+            "currency": info.get("currency"),
+            "sector": info.get("sector"),
+        }
+
+    async def _fundamental_loop(self):
+        await asyncio.sleep(5)  # beri jalan unduhan harga lebih dulu
+        while self.running:
+            for symbol in list(self.market_type_of):
+                if not self.running:
                     return
-                    
-            # Get stock data
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            
-            if not info or 'currentPrice' not in info:
-                return
-                
-            # Extract data
-            current_price = info.get('currentPrice', 0)
-            open_price = info.get('open', current_price)
-            high_price = info.get('dayHigh', current_price)
-            low_price = info.get('dayLow', current_price)
-            close_price = info.get('previousClose', current_price)
-            volume = info.get('volume', 0)
-            volume_avg = info.get('averageVolume', 0)
-            
-            # Calculate changes
-            change_amount = current_price - close_price
-            change_percent = (change_amount / close_price * 100) if close_price > 0 else 0
-            
-            # Market data object
-            market_data = {
-                'symbol': symbol,
-                'name': info.get('longName', symbol),
-                'current_price': current_price,
-                'open_price': open_price,
-                'high_price': high_price,
-                'low_price': low_price,
-                'close_price': close_price,
-                'volume': volume,
-                'volume_avg': volume_avg,
-                'market_cap': info.get('marketCap'),
-                'pe_ratio': info.get('trailingPE'),
-                'pb_ratio': info.get('priceToBook'),
-                'dividend_yield': info.get('dividendYield'),
-                'change_amount': change_amount,
-                'change_percent': change_percent,
-                'market_type': 'stock',
-                'exchange': info.get('exchange', 'Unknown'),
-                'currency': info.get('currency', 'USD'),
-                'day_high': info.get('dayHigh'),
-                'day_low': info.get('dayLow'),
-                'fifty_two_week_high': info.get('fiftyTwoWeekHigh'),
-                'fifty_two_week_low': info.get('fiftyTwoWeekLow'),
-                'timestamp': datetime.now(),
-            }
-            
-            # Update cache
-            self.market_data_cache[symbol] = market_data
-            
-            # Save to database
-            await self._save_market_data(market_data)
-            
-            # Update last update time
-            self.last_update[symbol] = now
-            
-            # Broadcast ke WebSocket
-            await self.websocket_manager.broadcast({
-                'type': 'market_update',
-                'symbol': symbol,
-                'data': market_data
-            }, channel='market_data')
-            
-        except Exception as e:
-            logger.error(f"❌ Error updating stock {symbol}: {e}")
-            
-    async def _update_crypto_price(self, symbol: str):
-        """Update crypto price dari exchange"""
-        try:
-            # Get ticker data
-            ticker = await self.crypto_exchange.fetch_ticker(symbol)
-            
-            if not ticker or 'last' not in ticker:
-                return
-                
-            current_price = ticker['last']
-            open_price = ticker.get('open', current_price)
-            high_price = ticker.get('high', current_price)
-            low_price = ticker.get('low', current_price)
-            volume = ticker.get('baseVolume', 0)
-            
-            # Calculate changes
-            change_amount = current_price - open_price
-            change_percent = (change_amount / open_price * 100) if open_price > 0 else 0
-            
-            # Market data object
-            market_data = {
-                'symbol': symbol,
-                'name': symbol.replace('USDT', '/USD'),
-                'current_price': current_price,
-                'open_price': open_price,
-                'high_price': high_price,
-                'low_price': low_price,
-                'close_price': open_price,  # Crypto uses open as reference
-                'volume': volume,
-                'volume_avg': None,
-                'market_cap': None,
-                'pe_ratio': None,
-                'pb_ratio': None,
-                'dividend_yield': None,
-                'change_amount': change_amount,
-                'change_percent': change_percent,
-                'market_type': 'crypto',
-                'exchange': 'Binance',
-                'currency': 'USDT',
-                'day_high': high_price,
-                'day_low': low_price,
-                'fifty_two_week_high': None,
-                'fifty_two_week_low': None,
-                'timestamp': datetime.now(),
-            }
-            
-            # Update cache
-            self.market_data_cache[symbol] = market_data
-            
-            # Save to database
-            await self._save_market_data(market_data)
-            
-            # Broadcast ke WebSocket
-            await self.websocket_manager.broadcast({
-                'type': 'market_update',
-                'symbol': symbol,
-                'data': market_data
-            }, channel='market_data')
-            
-        except Exception as e:
-            logger.error(f"❌ Error updating crypto {symbol}: {e}")
-            
-    async def _save_market_data(self, data: dict):
-        """Save market data ke database"""
+                try:
+                    self.fundamentals[symbol] = await asyncio.to_thread(self._fetch_fundamental, symbol)
+                    if symbol in self.market_data_cache:
+                        self.market_data_cache[symbol].update(
+                            {k: v for k, v in self.fundamentals[symbol].items() if v is not None and k != "sector"}
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Fundamental {symbol}: {e}")
+                await asyncio.sleep(1)  # sopan terhadap rate limit Yahoo
+            await asyncio.sleep(FUNDAMENTAL_REFRESH)
+
+    async def _save_market_data_batch(self, rows: List[dict]):
         try:
             async with AsyncSessionLocal() as session:
-                # Create market data record
-                market_data = MarketData(**data)
-                session.add(market_data)
+                session.add_all(MarketData(**r) for r in rows)
                 await session.commit()
-                
         except Exception as e:
             logger.error(f"❌ Error saving market data: {e}")
-            
+
     async def _market_summary_loop(self):
         """Loop untuk market summary updates"""
         while self.running:
@@ -341,6 +269,10 @@ class MarketDataManager:
         except Exception as e:
             logger.error(f"❌ Error saving market summary: {e}")
             
+    def to_idr(self, symbol: str) -> Optional[float]:
+        """Faktor konversi harga simbol ke IDR (None bila kurs belum ada)."""
+        return 1.0 if symbol.endswith(".JK") else self.usd_idr
+
     def get_market_data(self, symbol: str) -> Optional[dict]:
         """Get market data dari cache"""
         return self.market_data_cache.get(symbol)
@@ -350,24 +282,16 @@ class MarketDataManager:
         return self.market_data_cache.copy()
         
     async def get_historical_data(self, symbol: str, days: int = 30) -> List[dict]:
-        """Get historical market data"""
-        try:
-            async with AsyncSessionLocal() as session:
-                # Query historical data
-                from sqlalchemy import select, desc
-                
-                stmt = (
-                    select(MarketData)
-                    .where(MarketData.symbol == symbol)
-                    .order_by(desc(MarketData.timestamp))
-                    .limit(days * 24)  # Asumsi hourly data
-                )
-                
-                result = await session.execute(stmt)
-                records = result.scalars().all()
-                
-                return [record.to_dict() for record in records]
-                
-        except Exception as e:
-            logger.error(f"❌ Error getting historical data for {symbol}: {e}")
+        """Candle harian (OHLCV) terakhir `days` hari dari unduhan Yahoo."""
+        df = self.history.get(symbol)
+        if df is None:
             return []
+        return [
+            {
+                "timestamp": ts.isoformat(),
+                "open_price": float(r["Open"]), "high_price": float(r["High"]),
+                "low_price": float(r["Low"]), "close_price": float(r["Close"]),
+                "volume": _num(r["Volume"]) or 0.0,
+            }
+            for ts, r in df.tail(days).iterrows()
+        ]

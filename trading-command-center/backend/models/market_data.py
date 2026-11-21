@@ -19,11 +19,11 @@ class MarketData(Base):
     name = Column(String(200), nullable=True)
     
     # Price data
-    current_price = Column(Numeric(15, 4), nullable=False)
-    open_price = Column(Numeric(15, 4), nullable=False)
-    high_price = Column(Numeric(15, 4), nullable=False)
-    low_price = Column(Numeric(15, 4), nullable=False)
-    close_price = Column(Numeric(15, 4), nullable=False)
+    current_price = Column(Float, nullable=False)
+    open_price = Column(Float, nullable=False)
+    high_price = Column(Float, nullable=False)
+    low_price = Column(Float, nullable=False)
+    close_price = Column(Float, nullable=False)
     
     # Volume data
     volume = Column(Numeric(20, 2), nullable=True)
@@ -36,7 +36,7 @@ class MarketData(Base):
     dividend_yield = Column(Numeric(6, 2), nullable=True)
     
     # Change data
-    change_amount = Column(Numeric(15, 4), nullable=False)
+    change_amount = Column(Float, nullable=False)
     change_percent = Column(Numeric(8, 4), nullable=False)
     
     # Timestamps
@@ -49,10 +49,10 @@ class MarketData(Base):
     currency = Column(String(10), nullable=True)
     
     # Additional metrics
-    day_high = Column(Numeric(15, 4), nullable=True)
-    day_low = Column(Numeric(15, 4), nullable=True)
-    fifty_two_week_high = Column(Numeric(15, 4), nullable=True)
-    fifty_two_week_low = Column(Numeric(15, 4), nullable=True)
+    day_high = Column(Float, nullable=True)
+    day_low = Column(Float, nullable=True)
+    fifty_two_week_high = Column(Float, nullable=True)
+    fifty_two_week_low = Column(Float, nullable=True)
     
     # Indexes untuk performance
     __table_args__ = (
@@ -108,8 +108,8 @@ class MarketSummary(Base):
     
     # Market indices
     composite_index = Column(String(50), nullable=True)
-    index_value = Column(Numeric(15, 4), nullable=True)
-    index_change = Column(Numeric(15, 4), nullable=True)
+    index_value = Column(Float, nullable=True)
+    index_change = Column(Float, nullable=True)
     index_change_percent = Column(Numeric(8, 4), nullable=True)
     
     # Sector performance

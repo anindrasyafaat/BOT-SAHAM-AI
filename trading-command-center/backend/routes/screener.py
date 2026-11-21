@@ -1,411 +1,135 @@
 """
-Screener Routes untuk Trading Command Center
-API endpoints untuk market screening dan filtering
+Screener Routes: dihitung dari data pasar terbaru + candle harian (market_data/manager.py).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import List, Optional, Dict, Any
-from sqlalchemy.ext.asyncio import AsyncSession
-from database.connection import get_db_session
-from utils.logger import setup_logging
+from typing import Callable, List, Optional
 
-logger = setup_logging()
+import pandas as pd
+from fastapi import APIRouter, HTTPException, Query, Request
+
 router = APIRouter()
+MARKET = Query("all", pattern="^(all|indonesia|us|crypto)$")
+
+
+def rsi(closes: pd.Series, length: int = 14) -> Optional[float]:
+    """RSI Wilder."""
+    if len(closes) <= length:
+        return None
+    delta = closes.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / length, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / length, adjust=False).mean()
+    last_loss = float(loss.iloc[-1])
+    return 100.0 if last_loss == 0 else float(100 - 100 / (1 + gain.iloc[-1] / last_loss))
+
+
+def _rows(request: Request, market_type: str) -> List[dict]:
+    mdm = getattr(request.app.state, "market_data_manager", None)
+    if mdm is None:
+        raise HTTPException(status_code=503, detail="Market data belum siap")
+    out = []
+    for sym, q in mdm.get_all_market_data().items():
+        if market_type != "all" and mdm.market_type_of.get(sym) != market_type:
+            continue
+        hist = mdm.history.get(sym)
+        vol_avg = q.get("volume_avg") or 0
+        out.append({
+            "symbol": sym, "name": q.get("name", sym), "market": mdm.market_type_of.get(sym),
+            "price": q["current_price"], "change": q["change_amount"], "change_percent": q["change_percent"],
+            "volume": q.get("volume") or 0, "avg_volume": vol_avg,
+            "volume_ratio": (q.get("volume") or 0) / vol_avg if vol_avg else None,
+            "market_cap": q.get("market_cap"),
+            "fifty_two_week_high": q.get("fifty_two_week_high"),
+            "rsi": rsi(hist["Close"]) if hist is not None else None,
+            "_hist": hist,
+        })
+    return out
+
+
+def _respond(rows: List[dict], keep: Callable[[dict], bool], key: Callable[[dict], float],
+             criteria: Callable[[dict], List[str]], limit: int, params: dict, reverse=True):
+    hits = sorted((r for r in rows if keep(r)), key=key, reverse=reverse)[:limit]
+    data = [{**{k: v for k, v in r.items() if k != "_hist"}, "criteria_met": criteria(r)} for r in hits]
+    return {"status": "success", "data": data, "total": len(data), "criteria": params}
+
+
+def _vol_ok(r, min_volume):
+    return min_volume is None or r["volume"] >= min_volume
 
 
 @router.get("/gainers")
-async def screen_gainers(
-    market_type: str = Query("all", regex="^(all|indonesia|us|crypto)$"),
-    min_change: float = Query(3.0, description="Minimum change percentage"),
-    min_volume: Optional[float] = Query(None, description="Minimum volume"),
-    limit: int = Query(20, ge=1, le=100),
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Screen for top gainers"""
-    try:
-        # Mock screening results untuk demo
-        results = [
-            {
-                "symbol": "GOTO.JK",
-                "name": "GoTo Gojek Tokopedia",
-                "price": 125,
-                "change": 15.5,
-                "change_percent": 14.15,
-                "volume": 250000000,
-                "market_cap": 150000000000,
-                "criteria_met": ["High Volume", "Strong Momentum", "Breakout"]
-            },
-            {
-                "symbol": "TLKM.JK",
-                "name": "Telkom Indonesia",
-                "price": 4850,
-                "change": 425,
-                "change_percent": 9.6,
-                "volume": 125000000,
-                "market_cap": 480000000000,
-                "criteria_met": ["Blue Chip", "Dividend Yield", "Technical Breakout"]
-            },
-            {
-                "symbol": "ANTM.JK",
-                "name": "Aneka Tambang",
-                "price": 2850,
-                "change": 225,
-                "change_percent": 8.57,
-                "volume": 87500000,
-                "market_cap": 280000000000,
-                "criteria_met": ["Commodity Play", "Volume Surge", "Trend Following"]
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": results,
-            "total": len(results),
-            "criteria": {
-                "market_type": market_type,
-                "min_change": min_change,
-                "min_volume": min_volume
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error screening gainers: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def screen_gainers(request: Request, market_type: str = MARKET, min_change: float = Query(3.0),
+                         min_volume: Optional[float] = Query(None), limit: int = Query(20, ge=1, le=100)):
+    return _respond(_rows(request, market_type),
+                    lambda r: r["change_percent"] >= min_change and _vol_ok(r, min_volume),
+                    lambda r: r["change_percent"],
+                    lambda r: [f"Naik {r['change_percent']:.1f}%"] + (["Volume tinggi"] if (r["volume_ratio"] or 0) >= 1.5 else []),
+                    limit, {"market_type": market_type, "min_change": min_change, "min_volume": min_volume})
 
 
 @router.get("/losers")
-async def screen_losers(
-    market_type: str = Query("all", regex="^(all|indonesia|us|crypto)$"),
-    max_change: float = Query(-3.0, description="Maximum change percentage (negative)"),
-    min_volume: Optional[float] = Query(None, description="Minimum volume"),
-    limit: int = Query(20, ge=1, le=100),
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Screen for top losers (potential reversal opportunities)"""
-    try:
-        # Mock screening results untuk demo
-        results = [
-            {
-                "symbol": "ADRO.JK",
-                "name": "Adaro Energy",
-                "price": 2850,
-                "change": -225,
-                "change_percent": -7.32,
-                "volume": 150000000,
-                "market_cap": 850000000000,
-                "criteria_met": ["Oversold", "High Volume", "Support Level"],
-                "reversal_potential": "High"
-            },
-            {
-                "symbol": "ICBP.JK",
-                "name": "Indofood CBP",
-                "price": 8750,
-                "change": -425,
-                "change_percent": -4.63,
-                "volume": 65000000,
-                "market_cap": 420000000000,
-                "criteria_met": ["Consumer Defensive", "Dividend Play", "Oversold"],
-                "reversal_potential": "Medium"
-            },
-            {
-                "symbol": "UNTR.JK",
-                "name": "United Tractors",
-                "price": 48500,
-                "change": -2100,
-                "change_percent": -4.15,
-                "volume": 35000000,
-                "market_cap": 2800000000000,
-                "criteria_met": ["Heavy Equipment", "Commodity Correlation", "Support Zone"],
-                "reversal_potential": "Medium"
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": results,
-            "total": len(results),
-            "criteria": {
-                "market_type": market_type,
-                "max_change": max_change,
-                "min_volume": min_volume
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error screening losers: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def screen_losers(request: Request, market_type: str = MARKET, max_change: float = Query(-3.0),
+                        min_volume: Optional[float] = Query(None), limit: int = Query(20, ge=1, le=100)):
+    return _respond(_rows(request, market_type),
+                    lambda r: r["change_percent"] <= max_change and _vol_ok(r, min_volume),
+                    lambda r: r["change_percent"],
+                    lambda r: [f"Turun {r['change_percent']:.1f}%"] + (["Volume tinggi"] if (r["volume_ratio"] or 0) >= 1.5 else []),
+                    limit, {"market_type": market_type, "max_change": max_change, "min_volume": min_volume},
+                    reverse=False)
 
 
 @router.get("/volume-explosion")
-async def screen_volume_explosion(
-    market_type: str = Query("all", regex="^(all|indonesia|us|crypto)$"),
-    min_volume_ratio: float = Query(2.0, description="Minimum volume ratio vs average"),
-    min_price_change: float = Query(2.0, description="Minimum price change percentage"),
-    limit: int = Query(20, ge=1, le=100),
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Screen for volume explosion patterns"""
-    try:
-        # Mock screening results untuk demo
-        results = [
-            {
-                "symbol": "BMRI.JK",
-                "name": "Bank Mandiri",
-                "price": 7250,
-                "change": 350,
-                "change_percent": 5.07,
-                "volume": 450000000,
-                "avg_volume": 125000000,
-                "volume_ratio": 3.6,
-                "market_cap": 1650000000000,
-                "criteria_met": ["Volume Explosion", "Price Breakout", "Institutional Interest"]
-            },
-            {
-                "symbol": "PGAS.JK",
-                "name": "Perusahaan Gas Negara",
-                "price": 2850,
-                "change": 185,
-                "change_percent": 6.94,
-                "volume": 325000000,
-                "avg_volume": 85000000,
-                "volume_ratio": 3.82,
-                "market_cap": 680000000000,
-                "criteria_met": ["Volume Surge", "Commodity Rally", "Technical Breakout"]
-            },
-            {
-                "symbol": "PTBA.JK",
-                "name": "Bukit Asam",
-                "price": 3850,
-                "change": 225,
-                "change_percent": 6.21,
-                "volume": 285000000,
-                "avg_volume": 75000000,
-                "volume_ratio": 3.8,
-                "market_cap": 420000000000,
-                "criteria_met": ["Coal Rally", "Volume Breakout", "Momentum Play"]
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": results,
-            "total": len(results),
-            "criteria": {
-                "market_type": market_type,
-                "min_volume_ratio": min_volume_ratio,
-                "min_price_change": min_price_change
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error screening volume explosion: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def screen_volume_explosion(request: Request, market_type: str = MARKET,
+                                  min_volume_ratio: float = Query(2.0), min_price_change: float = Query(2.0),
+                                  limit: int = Query(20, ge=1, le=100)):
+    return _respond(_rows(request, market_type),
+                    lambda r: (r["volume_ratio"] or 0) >= min_volume_ratio and abs(r["change_percent"]) >= min_price_change,
+                    lambda r: r["volume_ratio"] or 0,
+                    lambda r: [f"Volume {r['volume_ratio']:.1f}× rata-rata 20 hari", f"Harga {r['change_percent']:+.1f}%"],
+                    limit, {"market_type": market_type, "min_volume_ratio": min_volume_ratio,
+                            "min_price_change": min_price_change})
 
 
 @router.get("/breakouts")
-async def screen_breakouts(
-    market_type: str = Query("all", regex="^(all|indonesia|us|crypto)$"),
-    min_breakout_strength: float = Query(3.0, description="Minimum breakout strength in percentage"),
-    lookback_days: int = Query(52, description="Lookback period for 52-week high"),
-    limit: int = Query(20, ge=1, le=100),
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Screen for breakout patterns (52-week high breakouts)"""
-    try:
-        # Mock screening results untuk demo
-        results = [
-            {
-                "symbol": "ASII.JK",
-                "name": "Astra International",
-                "price": 7200,
-                "change": 425,
-                "change_percent": 6.27,
-                "volume": 275000000,
-                "week_52_high": 7150,
-                "week_52_low": 4850,
-                "breakout_strength": 6.27,
-                "market_cap": 2800000000000,
-                "criteria_met": ["52-Week High Breakout", "Volume Confirmation", "Strong Momentum"]
-            },
-            {
-                "symbol": "KLBF.JK",
-                "name": "Kalbe Farma",
-                "price": 1680,
-                "change": 85,
-                "change_percent": 5.33,
-                "volume": 185000000,
-                "week_52_high": 1675,
-                "week_52_low": 1245,
-                "breakout_strength": 5.33,
-                "market_cap": 820000000000,
-                "criteria_met": ["52-Week High", "Healthcare Sector", "Dividend Aristocrat"]
-            },
-            {
-                "symbol": "SMGR.JK",
-                "name": "Semen Indonesia",
-                "price": 10250,
-                "change": 550,
-                "change_percent": 5.67,
-                "volume": 145000000,
-                "week_52_high": 10200,
-                "week_52_low": 7850,
-                "breakout_strength": 5.67,
-                "market_cap": 1560000000000,
-                "criteria_met": ["Infrastructure Play", "52-Week High Breakout", "Volume Spike"]
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": results,
-            "total": len(results),
-            "criteria": {
-                "market_type": market_type,
-                "min_breakout_strength": min_breakout_strength,
-                "lookback_days": lookback_days
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error screening breakouts: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def screen_breakouts(request: Request, market_type: str = MARKET,
+                           lookback_days: int = Query(20, ge=5, le=250), limit: int = Query(20, ge=1, le=100)):
+    def prior_high(r):
+        h = r["_hist"]
+        return float(h["High"].iloc[-lookback_days - 1:-1].max()) if h is not None and len(h) > lookback_days else None
+
+    def keep(r):
+        ph = prior_high(r)
+        r["breakout_level"] = ph
+        r["breakout_strength"] = (r["price"] / ph - 1) * 100 if ph else None
+        return ph is not None and r["price"] > ph
+
+    return _respond(_rows(request, market_type), keep, lambda r: r["breakout_strength"],
+                    lambda r: [f"Tembus high {lookback_days} hari ({r['breakout_level']:.4g})",
+                               f"+{r['breakout_strength']:.1f}% di atas level"]
+                    + (["Volume konfirmasi"] if (r["volume_ratio"] or 0) >= 1.5 else []),
+                    limit, {"market_type": market_type, "lookback_days": lookback_days})
 
 
 @router.get("/oversold")
-async def screen_oversold(
-    market_type: str = Query("all", regex="^(all|indonesia|us|crypto)$"),
-    max_rsi: float = Query(30.0, description="Maximum RSI level for oversold"),
-    min_volume: Optional[float] = Query(None, description="Minimum volume"),
-    limit: int = Query(20, ge=1, le=100),
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Screen for oversold conditions (potential mean reversion)"""
-    try:
-        # Mock screening results untuk demo
-        results = [
-            {
-                "symbol": "MIKA.JK",
-                "name": "Mitra Keluarga",
-                "price": 1580,
-                "change": -45,
-                "change_percent": -2.77,
-                "volume": 85000000,
-                "rsi": 28.5,
-                "market_cap": 235000000000,
-                "criteria_met": ["Oversold RSI", "Healthcare Defensive", "Support Level"],
-                "mean_reversion_potential": "High"
-            },
-            {
-                "symbol": "SIDO.JK",
-                "name": "Indofood Sukses Makmur",
-                "price": 485,
-                "change": -15,
-                "change_percent": -3.0,
-                "volume": 125000000,
-                "rsi": 26.8,
-                "market_cap": 420000000000,
-                "criteria_met": ["Oversold", "Consumer Staples", "Dividend Yield"],
-                "mean_reversion_potential": "Medium"
-            },
-            {
-                "symbol": "GGRM.JK",
-                "name": "Gudang Garam",
-                "price": 28500,
-                "change": -1200,
-                "change_percent": -4.04,
-                "volume": 35000000,
-                "rsi": 24.2,
-                "market_cap": 580000000000,
-                "criteria_met": ["Extremely Oversold", "Sin Stock", "High Dividend"],
-                "mean_reversion_potential": "High"
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": results,
-            "total": len(results),
-            "criteria": {
-                "market_type": market_type,
-                "max_rsi": max_rsi,
-                "min_volume": min_volume
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error screening oversold: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def screen_oversold(request: Request, market_type: str = MARKET, max_rsi: float = Query(30.0),
+                          min_volume: Optional[float] = Query(None), limit: int = Query(20, ge=1, le=100)):
+    return _respond(_rows(request, market_type),
+                    lambda r: r["rsi"] is not None and r["rsi"] <= max_rsi and _vol_ok(r, min_volume),
+                    lambda r: r["rsi"], lambda r: [f"RSI(14) {r['rsi']:.1f}"],
+                    limit, {"market_type": market_type, "max_rsi": max_rsi, "min_volume": min_volume}, reverse=False)
 
 
 @router.get("/custom")
-async def custom_screen(
-    market_type: str = Query("all", regex="^(all|indonesia|us|crypto)$"),
-    min_price: Optional[float] = Query(None, description="Minimum price"),
-    max_price: Optional[float] = Query(None, description="Maximum price"),
-    min_volume: Optional[float] = Query(None, description="Minimum volume"),
-    min_market_cap: Optional[float] = Query(None, description="Minimum market cap"),
-    min_change: Optional[float] = Query(None, description="Minimum change percentage"),
-    max_change: Optional[float] = Query(None, description="Maximum change percentage"),
-    limit: int = Query(50, ge=1, le=200),
-    session: AsyncSession = Depends(get_db_session)
-):
-    """Custom screening dengan multiple criteria"""
-    try:
-        # Mock screening results untuk demo
-        results = [
-            {
-                "symbol": "ACES.JK",
-                "name": "Ace Hardware Indonesia",
-                "price": 1450,
-                "change": 35,
-                "change_percent": 2.47,
-                "volume": 95000000,
-                "market_cap": 285000000000,
-                "pe_ratio": 18.5,
-                "pb_ratio": 2.1,
-                "dividend_yield": 2.8,
-                "criteria_met": [
-                    "Retail Play",
-                    "Consumer Discretionary",
-                    "Growth Stock",
-                    "Dividend Paying"
-                ]
-            },
-            {
-                "symbol": "AMRT.JK",
-                "name": "Sumber Alfaria Trijaya",
-                "price": 875,
-                "change": 25,
-                "change_percent": 2.94,
-                "volume": 185000000,
-                "market_cap": 165000000000,
-                "pe_ratio": 22.3,
-                "pb_ratio": 3.8,
-                "dividend_yield": 1.5,
-                "criteria_met": [
-                    "Retail Giant",
-                    "Consumer Staples",
-                    "Defensive Play",
-                    "High Volume"
-                ]
-            }
-        ]
-        
-        return {
-            "status": "success",
-            "data": results,
-            "total": len(results),
-            "criteria": {
-                "market_type": market_type,
-                "min_price": min_price,
-                "max_price": max_price,
-                "min_volume": min_volume,
-                "min_market_cap": min_market_cap,
-                "min_change": min_change,
-                "max_change": max_change
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error custom screening: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+async def custom_screen(request: Request, market_type: str = MARKET,
+                        min_price: Optional[float] = None, max_price: Optional[float] = None,
+                        min_volume: Optional[float] = None, min_market_cap: Optional[float] = None,
+                        min_change: Optional[float] = None, max_change: Optional[float] = None,
+                        limit: int = Query(50, ge=1, le=200)):
+    def keep(r):
+        return all([
+            min_price is None or r["price"] >= min_price, max_price is None or r["price"] <= max_price,
+            _vol_ok(r, min_volume), min_market_cap is None or (r["market_cap"] or 0) >= min_market_cap,
+            min_change is None or r["change_percent"] >= min_change,
+            max_change is None or r["change_percent"] <= max_change,
+        ])
+    return _respond(_rows(request, market_type), keep, lambda r: r["change_percent"], lambda r: ["Custom"],
+                    limit, {"market_type": market_type})
