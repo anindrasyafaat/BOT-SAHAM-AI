@@ -34,6 +34,8 @@ fs.writeFileSync(tr, [
   usage('m1', { input_tokens: 10, cache_creation_input_tokens: 1000, cache_creation: { ephemeral_1h_input_tokens: 600 }, output_tokens: 100 }),
   usage('m2', { input_tokens: 10, cache_read_input_tokens: 9000, output_tokens: 100 }),
   JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'x'.repeat(400) }] } }),
+  JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'Read', input: { file_path: '/a/b/c/shot.png' } }] } }),
+  JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: [{ type: 'image', source: { data: 'A'.repeat(400000) } }] }] } }),
   'not json',
 ].join('\n'));
 const r = audit([tr]);
@@ -47,6 +49,17 @@ assert.strictEqual(r.output, 200);
 assert.strictEqual(r.weightedActual, 3620);
 assert.strictEqual(r.weightedNoCache, 11020);
 assert.match(report(r), /Saving\s+: 67\.2%/);
+assert.deepStrictEqual(r.topToolResults[0], { label: 'Read: c/shot.png', tokens: 1600 }, 'image counted flat, path tail kept');
+assert.strictEqual(r.toolResultTokensApprox, 1700);
+assert.deepStrictEqual(r.perCall.map((c) => c.read), [0, 9000]);
+
+// html report renders and escapes transcript text
+const { renderHtml } = require('../scripts/report-html');
+const { tips, grade, W } = require('../scripts/token-audit');
+r.topToolResults.push({ label: 'Bash: echo </script><b>x', tokens: 1 });
+const html = renderHtml(r, { files: [tr], grade: grade(r), tips: tips(r), W });
+assert.ok(!html.includes('</script><b>'), 'transcript text cannot close the script tag');
+assert.strictEqual((html.match(/<\/script>/g) || []).length, 1);
 
 fs.rmSync(tmp, { recursive: true });
 console.log('hemat-token: all checks passed');

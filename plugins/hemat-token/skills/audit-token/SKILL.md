@@ -5,8 +5,8 @@ description: Audit token usage of the current (or a given) Claude Code session -
 
 # Audit token
 
-1. Run: `node "${CLAUDE_PLUGIN_ROOT}/scripts/token-audit.js"` (newest transcript), or pass `.jsonl` paths the user names.
-2. Show the report as-is.
+1. Run: `node "${CLAUDE_PLUGIN_ROOT}/scripts/token-audit.js" --html token-audit.html` (newest transcript), or pass `.jsonl` paths the user names.
+2. Show the text report as-is and give the user the absolute path of the HTML report (KPIs, cost composition, context per API call, biggest tool results, fixes; works offline, light/dark, phone).
 3. Add at most 3 concrete fixes, taken from the report's "Fix next" lines, applied to this session's actual behaviour.
 
 Grades: A >= 85% weighted saving, B >= 70%, C >= 50%, D below. The saving comes mostly from prompt caching; context discipline keeps it there as the session grows.

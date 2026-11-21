@@ -28,7 +28,9 @@ Biaya token ada di tiga tempat. Yang terbesar diserang lebih dulu:
 ```
 node plugins/hemat-token/test/run.js           # self-check hook + audit
 node plugins/hemat-token/scripts/token-audit.js # audit sesi terbaru
+node plugins/hemat-token/scripts/token-audit.js --html audit.html   # + laporan HTML
 ```
+Laporan HTML berupa satu file mandiri yang bisa dibuka offline, mendukung mode terang/gelap dan layar ponsel. Isinya: ringkasan penghematan + nilai, komposisi biaya aktual vs tanpa cache, konteks per panggilan API (untuk melihat konteks yang membengkak), 10 hasil tool terbesar beserta nama tool/file-nya, dan daftar perbaikan. Setiap grafik punya tooltip dan tampilan tabel.
 
 ## Hasil uji A/B (headless Claude, 21 November 2026)
 Tugas: perbaiki bug off-by-one yang ditanam di file 8.400 baris (total 19.000 baris), lalu jalankan test. Setiap arm dijalankan 2x di fixture baru.
