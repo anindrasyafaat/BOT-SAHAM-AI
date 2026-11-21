@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "bot-saham-ai",
+  "description": "Plugin Claude Code dari repo BOT-SAHAM-AI.",
+  "owner": {
+    "name": "Muhammad Anindra Syafa'at"
+  },
+  "plugins": [
+    {
+      "name": "pengelola-skill",
+      "description": "Memilih skill terpasang yang paling cocok untuk suatu pekerjaan; jika belum ada, merekomendasikan repo skill di GitHub berdasarkan jumlah bintang.",
+      "source": "./plugins/pengelola-skill",
+      "category": "productivity"
+    }
+  ]
+}

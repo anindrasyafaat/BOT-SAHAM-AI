@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pengelola Skill</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e4e4df;
+  --accent: #2f6fde; --good: #1f8a4c; --bad: #c4392f; --warn: #b7791f; --chip: #eef2fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111214; --panel: #1a1c1f; --text: #ecece8; --muted: #9a9a94; --line: #2b2e33;
+    --accent: #6f9cf0; --good: #4cc282; --bad: #ef6b60; --warn: #e0a84a; --chip: #23293a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111214; --panel: #1a1c1f; --text: #ecece8; --muted: #9a9a94; --line: #2b2e33;
+  --accent: #6f9cf0; --good: #4cc282; --bad: #ef6b60; --warn: #e0a84a; --chip: #23293a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 12px; margin-bottom: 20px; }
+h1 { margin: 0; font-size: 26px; letter-spacing: -0.01em; }
+h2 { margin: 0 0 12px; font-size: 16px; }
+.muted { color: var(--muted); font-size: 13px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.stat, section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.stat b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+input[type=search] { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+ol, ul { margin: 0; padding: 0; list-style: none; }
+li.row { padding: 10px 0; border-top: 1px solid var(--line); }
+li.row:first-child { border-top: 0; }
+.id { font-weight: 600; word-break: break-word; }
+.desc { color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; margin-top: 6px; }
+.bar > span { display: block; height: 6px; background: var(--accent); border-radius: 3px; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: 12px; margin-right: 4px; }
+.good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+.score { float: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+a { color: var(--accent); }
+code { font-size: 12px; background: var(--chip); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+details summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
+.empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
+button { font: inherit; background: none; border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Pengelola Skill</h1>
+      <div class="muted" id="dibuat"></div>
+    </div>
+    <button id="tema" type="button" aria-label="Ganti tema">◐ Tema</button>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <section style="margin-bottom:16px">
+    <h2>Uji pekerjaan</h2>
+    <input type="search" id="tugas" placeholder="Ketik pekerjaan, mis. analisa teknikal saham / stock technical analysis" aria-label="Pekerjaan">
+    <p class="muted" id="hint">Peringkat = kecocokan kata kunci + pengalaman dari catatan berhasil/gagal pada tugas mirip.</p>
+    <ol id="hasil"></ol>
+  </section>
+
+  <div class="grid">
+    <section>
+      <h2>Evolusi: usulan skill baru</h2>
+      <ul id="usulan"></ul>
+    </section>
+    <section>
+      <h2>Papan pengalaman</h2>
+      <ul id="papan"></ul>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section>
+      <h2>Rekomendasi GitHub (urut ★)</h2>
+      <div id="github"></div>
+    </section>
+    <section>
+      <h2>Riwayat terbaru</h2>
+      <ul id="riwayat"></ul>
+    </section>
+  </div>
+
+  <section>
+    <h2>Katalog skill terpasang</h2>
+    <input type="search" id="filter" placeholder="Saring katalog…" aria-label="Saring katalog">
+    <div id="katalog" style="margin-top:12px"></div>
+  </section>
+</main>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const STOP = new Set(D.stop);
+// Port dari cari_skill.py (kata, cocok, skor, mirip, pengalaman) agar hasil sama dengan CLI.
+const kata = t => (t.toLowerCase().match(/[a-z0-9]+/g) || []).filter(w => w.length > 2 && !STOP.has(w));
+const cocok = (w, set) => { for (const d of set) if (d.slice(0, 5) === w.slice(0, 5)) return true; return false; };
+const skor = (tugas, id, desk) => {
+  const q = kata(tugas); if (!q.length) return 0;
+  const n = new Set(kata(id.replace(/-/g, ' '))), d = new Set(kata(desk));
+  return q.reduce((s, w) => s + (cocok(w, n) ? 2 : cocok(w, d) ? 1 : 0), 0) / (2 * q.length);
+};
+const mirip = (a, b) => { const q = kata(a), k = new Set(kata(b)); return q.length ? q.filter(w => cocok(w, k)).length / q.length : 0; };
+const pengalaman = tugas => {
+  const h = {};
+  for (const r of D.riwayat) { const k = mirip(tugas, r.tugas); if (k >= 0.5) h[r.skill] = (h[r.skill] || 0) + (r.hasil === 'berhasil' ? 0.15 : -0.15) * k; }
+  for (const s in h) h[s] = Math.max(-0.3, Math.min(0.3, h[s]));
+  return h;
+};
+
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) k === 'class' ? e.className = v : e.setAttribute(k, v);
+  for (const c of kids) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+};
+const kosong = (box, teks) => box.replaceChildren(el('li', { class: 'empty' }, teks));
+const tgl = s => s ? s.replace('T', ' ').slice(0, 16) : '';
+
+document.getElementById('dibuat').textContent = `Dibuat ${tgl(D.dibuat)} · jalankan ulang "cari_skill.py dashboard" untuk memperbarui`;
+
+const berhasil = D.riwayat.filter(r => r.hasil === 'berhasil').length;
+const plugin = new Set(D.skill.map(s => s.id.includes(':') ? s.id.split(':')[0] : '(mandiri)'));
+document.getElementById('stats').replaceChildren(...[
+  ['Skill terpasang', D.skill.length], ['Plugin', plugin.size], ['Catatan belajar', D.riwayat.length],
+  ['Tingkat berhasil', D.riwayat.length ? Math.round(100 * berhasil / D.riwayat.length) + '%' : '–'],
+  ['Celah terbuka', D.celah.length],
+].map(([l, v]) => el('div', { class: 'stat' }, el('span', { class: 'muted' }, l), el('b', {}, v))));
+
+// Uji pekerjaan
+const hasil = document.getElementById('hasil');
+const uji = () => {
+  const t = document.getElementById('tugas').value.trim();
+  if (!t) return hasil.replaceChildren();
+  const exp = pengalaman(t);
+  const rows = D.skill.map(s => ({ ...s, e: exp[s.id] || 0, n: skor(t, s.id, s.desk) + (exp[s.id] || 0) }))
+    .filter(r => r.n >= 0.25).sort((a, b) => b.n - a.n).slice(0, 8);
+  if (!rows.length) return kosong(hasil, 'Tidak ada skill terpasang yang cocok → jalankan: cari_skill.py github "<kata kunci Inggris>"');
+  hasil.replaceChildren(...rows.map(r => el('li', { class: 'row' },
+    el('span', { class: 'score' }, r.n.toFixed(2), r.e ? el('span', { class: r.e > 0 ? 'good' : 'bad' }, ` (${r.e > 0 ? '+' : ''}${r.e.toFixed(2)} pengalaman)`) : ''),
+    el('div', { class: 'id' }, r.id), el('div', { class: 'desc' }, r.desk),
+    el('div', { class: 'bar' }, Object.assign(el('span'), { style: `width:${Math.min(100, r.n * 100)}%` })))));
+};
+document.getElementById('tugas').addEventListener('input', uji);
+
+// Evolusi
+const usulan = document.getElementById('usulan');
+const itemsU = [
+  ...D.usulan.map(u => el('li', { class: 'row' },
+    el('div', { class: 'id' }, '＋ ', u.nama, ' ', el('span', { class: 'chip' }, `${u.jumlah}× diminta`)),
+    el('div', { class: 'desc' }, u.tugas.join(' · ')),
+    el('div', { class: 'muted' }, 'Buat: ', el('code', {}, `~/.claude/skills/${u.nama}/SKILL.md`), ' atau pasang dari GitHub'))),
+  ...D.lemah.map(w => el('li', { class: 'row' },
+    el('div', { class: 'id warn' }, '⚠ ', w.skill),
+    el('div', { class: 'muted' }, `berhasil ${w.berhasil} / gagal ${w.gagal} → cari pengganti atau perbaiki`))),
+];
+itemsU.length ? usulan.replaceChildren(...itemsU)
+  : kosong(usulan, 'Belum ada pola. Usulan muncul saat ≥2 pekerjaan mirip tidak punya skill, atau sebuah skill lebih sering gagal.');
+if (D.celah.length) usulan.append(el('li', { class: 'row muted' }, 'Celah terbuka: ', D.celah.map(c => c.tugas).join(' · ')));
+
+// Papan pengalaman
+const papan = document.getElementById('papan');
+const st = [...D.statistik].sort((a, b) => (b.berhasil - b.gagal) - (a.berhasil - a.gagal));
+st.length ? papan.replaceChildren(...st.map(s => {
+  const n = s.berhasil + s.gagal, p = n ? s.berhasil / n : 0;
+  return el('li', { class: 'row' },
+    el('span', { class: 'score' }, el('span', { class: 'good' }, s.berhasil, '✓'), ' ', el('span', { class: 'bad' }, s.gagal, '✗')),
+    el('div', { class: 'id' }, s.skill),
+    el('div', { class: 'bar' }, Object.assign(el('span'), { style: `width:${p * 100}%` })));
+})) : kosong(papan, 'Belum ada catatan. Setelah memakai skill, jalankan: cari_skill.py catat <skill> "<tugas>" --hasil berhasil|gagal');
+
+// GitHub
+const gh = document.getElementById('github');
+const kunci = Object.entries(D.github).sort((a, b) => b[1].waktu.localeCompare(a[1].waktu));
+kunci.length ? gh.replaceChildren(...kunci.map(([k, v], i) => {
+  const d = el('details', i === 0 ? { open: '' } : {}, el('summary', {}, `“${k}” `, el('span', { class: 'muted' }, tgl(v.waktu))));
+  d.append(el('ol', {}, ...v.repo.map(r => el('li', { class: 'row' },
+    el('span', { class: 'score' }, '★ ', r.bintang.toLocaleString('id-ID')),
+    el('a', { href: r.url, target: '_blank', rel: 'noopener noreferrer', class: 'id' }, r.nama),
+    el('div', { class: 'desc' }, r.deskripsi || '-'),
+    el('div', { class: 'muted' }, 'update ', r.update)))));
+  return d;
+})) : gh.replaceChildren(el('p', { class: 'empty' }, 'Belum ada pencarian GitHub.'));
+
+// Riwayat
+const rw = document.getElementById('riwayat');
+D.riwayat.length ? rw.replaceChildren(...D.riwayat.slice(-12).reverse().map(r => el('li', { class: 'row' },
+  el('span', { class: 'score ' + (r.hasil === 'berhasil' ? 'good' : 'bad') }, r.hasil),
+  el('div', { class: 'id' }, r.skill), el('div', { class: 'desc' }, r.tugas, r.catatan ? ` — ${r.catatan}` : ''),
+  el('div', { class: 'muted' }, tgl(r.waktu))))) : kosong(rw, 'Belum ada riwayat.');
+
+// Katalog
+const katalog = document.getElementById('katalog');
+const renderKatalog = f => {
+  const q = f.toLowerCase(), grup = {};
+  for (const s of D.skill) {
+    if (q && !(s.id + ' ' + s.desk).toLowerCase().includes(q)) continue;
+    const p = s.id.includes(':') ? s.id.split(':')[0] : '(mandiri)';
+    (grup[p] ||= []).push(s);
+  }
+  const keys = Object.keys(grup).sort();
+  if (!keys.length) return katalog.replaceChildren(el('p', { class: 'empty' }, 'Tidak ada yang cocok.'));
+  katalog.replaceChildren(...keys.map(p => el('details', q ? { open: '' } : {},
+    el('summary', {}, p, ' ', el('span', { class: 'chip' }, grup[p].length)),
+    el('ul', {}, ...grup[p].map(s => el('li', { class: 'row' }, el('div', { class: 'id' }, s.id), el('div', { class: 'desc' }, s.desk)))))));
+};
+document.getElementById('filter').addEventListener('input', e => renderKatalog(e.target.value));
+renderKatalog('');
+
+// Tema
+document.getElementById('tema').addEventListener('click', () => {
+  const r = document.documentElement, gelap = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  r.dataset.theme = gelap ? 'light' : 'dark';
+  try { localStorage.setItem('ps-tema', r.dataset.theme); } catch (e) {}
+});
+try { const t = localStorage.getItem('ps-tema'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</body>
+</html>
