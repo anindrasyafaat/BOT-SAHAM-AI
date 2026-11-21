@@ -112,11 +112,11 @@ async def market_data_health():
 
 
 @router.get("/websocket")
-async def websocket_health():
+async def websocket_health(request: Request):
     """WebSocket health check"""
     try:
-        # Get WebSocket statistics
-        from main import websocket_manager
+        gen = getattr(request.app.state, "signal_generator", None)
+        websocket_manager = gen.websocket_manager if gen else None
         
         if websocket_manager:
             stats = websocket_manager.get_connection_stats()

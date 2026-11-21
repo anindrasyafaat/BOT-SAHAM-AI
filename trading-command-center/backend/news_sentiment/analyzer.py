@@ -66,8 +66,15 @@ def _item(id_, title, source, url, published_at, related, query):
     }
 
 
+MAX_RSS_BYTES = 2_000_000
+
+
 def parse_google_rss(xml_text: str, query: str, related: List[str], count: int) -> List[dict]:
-    root = ET.fromstring(xml_text)
+    # Data eksternal: RSS sah tidak butuh DTD; menolaknya menutup serangan entity expansion (XML bomb)
+    # tanpa dependensi tambahan.
+    if len(xml_text) > MAX_RSS_BYTES or "<!DOCTYPE" in xml_text.upper() or "<!ENTITY" in xml_text.upper():
+        raise ValueError("RSS ditolak: terlalu besar atau memuat DTD/ENTITY")
+    root = ET.fromstring(xml_text)  # nosec B314 - DTD/ENTITY sudah ditolak di atas
     items = []
     for it in root.iter("item"):
         title = it.findtext("title") or ""

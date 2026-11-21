@@ -11,13 +11,19 @@ services:
     container_name: tcc-backend
     restart: always
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # hanya lokal; akses publik lewat nginx
     environment:
       - ENVIRONMENT=production
       - DATABASE_URL=sqlite:///data/trading.db
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - APP_PASSWORD=${APP_PASSWORD:?Isi APP_PASSWORD di .env (password login dashboard)}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - OLLAMA_URL=${OLLAMA_URL:-}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # agar backend bisa memanggil Ollama di komputer host
     volumes:
       - ./backend/data:/app/data
       - ./backend/logs:/app/logs

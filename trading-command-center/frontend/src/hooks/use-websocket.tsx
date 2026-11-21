@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from 'react-query'
 import { toast } from './use-toast'
+import { getToken } from './use-api'
 
 // Protokol backend (FastAPI WebSocket /ws): JSON {type, data|signal, symbol?}; klien kirim {type: 'subscribe', channel, symbol?}.
 interface WebSocketMessage {
@@ -25,7 +26,10 @@ interface UseWebSocketReturn {
 }
 
 const MAX_MESSAGES = 100
-const wsUrl = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+const wsUrl = () => {
+  const t = getToken()
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws${t ? `?token=${encodeURIComponent(t)}` : ''}`
+}
 
 export function useWebSocket(): UseWebSocketReturn {
   const qc = useQueryClient()

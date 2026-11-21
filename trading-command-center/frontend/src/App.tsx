@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider } from 'react-query'
 import { Toaster } from '@/components/ui/toaster'
 import { ThemeProvider } from '@/components/theme-provider'
 import { WebSocketProvider } from '@/hooks/use-websocket'
-import { AuthProvider } from '@/hooks/use-auth'
+import { AuthProvider, useAuth } from '@/hooks/use-auth'
+import { LoginPage } from '@/pages/login'
 
 // Layout Components
 import { Layout } from '@/components/layout/layout'
@@ -19,6 +20,7 @@ import { ScreenerPage } from '@/pages/screener'
 import { NewsPage } from '@/pages/news'
 import { SettingsPage } from '@/pages/settings'
 import { BrainPage } from '@/pages/brain'
+import { GeneratePage } from '@/pages/generate'
 
 // Global styles
 import './index.css'
@@ -34,6 +36,13 @@ const queryClient = new QueryClient({
   },
 })
 
+// Konten (termasuk WebSocket) baru dipasang setelah login, agar token sudah tersedia.
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const { isLoading, isAuthenticated } = useAuth()
+  if (isLoading) return null
+  return isAuthenticated ? <>{children}</> : <LoginPage />
+}
+
 function App() {
   const [isLoading, setIsLoading] = useState(true)
 
@@ -42,7 +51,7 @@ function App() {
     const initializeApp = async () => {
       try {
         // Check API connection
-        const response = await fetch('/api/health')
+        const response = await fetch('/health')
         if (response.ok) {
           console.log('✅ Trading Command Center API connected')
         } else {
@@ -74,6 +83,7 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <ThemeProvider defaultTheme="dark" storageKey="tcc-theme">
         <AuthProvider>
+          <AuthGate>
           <WebSocketProvider>
             <Router>
               <div className="min-h-screen bg-background font-sans antialiased">
@@ -90,6 +100,7 @@ function App() {
                         <Route path="/screener" element={<ScreenerPage />} />
                         <Route path="/news" element={<NewsPage />} />
                         <Route path="/brain" element={<BrainPage />} />
+                        <Route path="/generate" element={<GeneratePage />} />
                         <Route path="/settings" element={<SettingsPage />} />
                       </Routes>
                     </main>
@@ -97,8 +108,9 @@ function App() {
                 </Layout>
               </div>
             </Router>
-            <Toaster />
           </WebSocketProvider>
+          </AuthGate>
+          <Toaster />
         </AuthProvider>
       </ThemeProvider>
     </QueryClientProvider>

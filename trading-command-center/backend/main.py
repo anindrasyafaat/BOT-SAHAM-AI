@@ -6,7 +6,10 @@ Entry point utama untuk backend trading command center
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
+
+import auth
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -17,7 +20,7 @@ from database.connection import init_database
 from websocket.manager import ConnectionManager
 from routes import (
     market_data, signals, portfolio, 
-    screener, news, notifications, health
+    screener, news, notifications, health, insight
 )
 from market_data.manager import MarketDataManager
 from signals.generator import SignalGenerator
@@ -36,6 +39,7 @@ websocket_manager: ConnectionManager = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan manager untuk startup dan shutdown"""
+    auth.check_startup()
     global market_data_manager, signal_generator, websocket_manager
     
     # Startup
@@ -98,14 +102,46 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
+# CORS: hanya origin terdaftar; tanpa cookie (auth memakai header Bearer)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure untuk production
-    allow_credentials=True,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_login(request, call_next):
+    """Satu titik penegakan auth untuk seluruh /api/* (kecuali login/status)."""
+    path = request.url.path
+    if (auth.enabled() and path.startswith("/api") and request.method != "OPTIONS"
+            and path not in auth.PUBLIC_PATHS and not auth.verify(auth.bearer(request.headers.get("authorization")))):
+        return JSONResponse(status_code=401, content={"detail": "Login diperlukan"})
+    return await call_next(request)
+
+
+class LoginIn(BaseModel):
+    password: str = Field(max_length=200)
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    return {"required": auth.enabled(),
+            "authenticated": auth.verify(auth.bearer(request.headers.get("authorization")))}
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: LoginIn):
+    if not auth.enabled():
+        return {"token": None, "required": False}
+    if auth.throttled():
+        raise HTTPException(status_code=429, detail="Terlalu banyak percobaan, tunggu 1 menit")
+    token = auth.login(body.password)
+    if not token:
+        raise HTTPException(status_code=401, detail="Password salah")
+    return {"token": token, "required": True}
 
 
 
@@ -125,6 +161,9 @@ async def root():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint untuk real-time market data dan signals"""
+    if not auth.verify(websocket.query_params.get("token")):
+        await websocket.close(code=1008)  # policy violation: belum login
+        return
     await websocket_manager.connect(websocket)
     
     try:
@@ -175,6 +214,7 @@ app.include_router(screener.router, prefix="/api/screener", tags=["Screener"])
 app.include_router(news.router, prefix="/api/news", tags=["News"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
 app.include_router(health.router, prefix="/api/health", tags=["Health"])
+app.include_router(insight.router, prefix="/api/insight", tags=["Generate"])
 
 
 # Global exception handler

@@ -508,6 +508,11 @@ Risk/Reward: {signal.risk_reward_ratio or 'N/A'}
                 names = set((await session.execute(select(TradingSignal.strategy_name).distinct())).scalars())
             for strategy in sorted(names | set(self.strategy_configs)):
                 await self._calculate_strategy_performance(strategy)
+
+            # Fitur Generate: lengkapi konteks pengalaman sinyal & nilai keputusan yang sudah jatuh tempo
+            from insight.service import ensure_contexts, evaluate_due
+            await ensure_contexts(self.market_data_manager)
+            await evaluate_due(self.market_data_manager)
                 
         except Exception as e:
             logger.error(f"❌ Error updating performance metrics: {e}")

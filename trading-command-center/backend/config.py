@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False)  # True membuka pesan error ke klien
     
     # Server Configuration
-    host: str = Field(default="0.0.0.0")
+    host: str = Field(default="127.0.0.1")  # Docker memakai --host 0.0.0.0 secara eksplisit
     port: int = Field(default=8000)
     
     # Database
@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     telegram_chat_id: Optional[str] = Field(default=None)
     discord_webhook_url: Optional[str] = Field(default=None)
     
+    # Keamanan (gratis): password tunggal + origin yang boleh memanggil API dari browser
+    app_password: str = Field(default="")
+    secret_key: str = Field(default="")
+    cors_origins: List[str] = Field(default=["http://localhost", "http://localhost:3000", "http://127.0.0.1:3000"])
+
+    # LLM lokal opsional (Ollama, gratis). Kosong = narasi template.
+    ollama_url: str = Field(default="")
+    ollama_model: str = Field(default="llama3.1:8b")
+    ollama_timeout: float = Field(default=60.0)
+
     # Trading Parameters
     max_positions: int = Field(default=10)
     risk_per_trade: float = Field(default=0.02)  # 2%
@@ -94,8 +104,9 @@ def get_database_url() -> str:
 
 def get_supported_symbols() -> dict:
     """Mendapatkan semua symbol yang didukung"""
+    uniq = lambda xs: list(dict.fromkeys(xs))  # daftar default sempat berisi duplikat
     return {
-        "indonesia": settings.indonesia_stocks,
-        "us": settings.us_stocks,
-        "crypto": settings.crypto_symbols
+        "indonesia": uniq(settings.indonesia_stocks),
+        "us": uniq(settings.us_stocks),
+        "crypto": uniq(settings.crypto_symbols)
     }

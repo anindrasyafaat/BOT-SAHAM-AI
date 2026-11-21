@@ -201,7 +201,7 @@ def gh_search(q, n):
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=30) as r:  # nosec B310 - URL konstanta https://api.github.com
         return json.load(r).get("items", [])
 
 

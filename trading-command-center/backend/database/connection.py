@@ -58,6 +58,7 @@ async def init_database() -> None:
             from models.market_data import MarketData
             from models.signals import TradingSignal
             from models.portfolio import Position, Trade
+            from models.insight import SignalContext, Generation
             
             # Create semua tables
             await conn.run_sync(Base.metadata.create_all)

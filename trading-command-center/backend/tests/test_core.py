@@ -97,6 +97,10 @@ def test_free_source_parsers():
     item = parse_google_rss(rss, "IHSG saham", [], 5)[0]
     assert item["title"] == "IHSG Anjlok 3%" and item["sentiment"] == "negative" and item["source"] == "Kontan"
     assert use_google_news("BBCA.JK") and not use_google_news("AAPL")
+    import pytest
+    bomb = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><rss>&b;</rss>'
+    with pytest.raises(ValueError):
+        parse_google_rss(bomb, "q", [], 5)
 
     q = coingecko_quote("BTCUSDT", {"usd": 110.0, "usd_24h_change": 10.0, "usd_24h_vol": 5.0}, None)
     assert round(q["close_price"], 6) == 100 and round(q["change_percent"], 6) == 10 and q["market_type"] == "crypto"

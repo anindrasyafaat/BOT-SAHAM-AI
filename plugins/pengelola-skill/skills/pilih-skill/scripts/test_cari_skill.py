@@ -38,7 +38,33 @@ def test_pengalaman_dan_evolusi():
     assert [w["skill"] for w in lemah] == ["b:jelek"]
 
 
+
+
+def test_audit_memori_korup_dan_dashboard_aman():
+    import json, os, subprocess, sys
+    with tempfile.TemporaryDirectory() as d:
+        mem = Path(d) / "memori.json"
+        mem.write_text("{rusak json")                       # memori korup tidak boleh membuat crash
+        env = {**os.environ, "PENGELOLA_SKILL_MEMORI": str(mem), "GITHUB_TOKEN": "ghp_RAHASIA_UJI"}
+        run = lambda *a: subprocess.run([sys.executable, str(Path(__file__).parent / "cari_skill.py"), *a],
+                                        env=env, capture_output=True, text=True, timeout=120)
+        r = run("evolusi")
+        assert r.returncode == 0, r.stderr
+        r = run("catat", "x:y", "tugas </script><script>alert(1)</script>", "--hasil", "berhasil")
+        assert r.returncode == 0 and json.loads(mem.read_text())["riwayat"]
+        out = Path(d) / "dash.html"
+        r = run("dashboard", "--out", str(out))
+        html = out.read_text()
+        # data pengguna tidak boleh menutup <script> lebih awal (XSS)
+        assert "</script><script>alert(1)" not in html and "<\\/script>" in html
+        r = run("github", "!!!")                            # kueri kosong -> keluar rapi
+        assert r.returncode != 0 and "Kata kunci kosong" in (r.stderr + r.stdout)
+        for x in (r.stdout, r.stderr):
+            assert "ghp_RAHASIA_UJI" not in x                 # token tidak pernah dicetak
+
+
 if __name__ == "__main__":
     test_lokal_peringkat_dan_nama_plugin()
     test_pengalaman_dan_evolusi()
+    test_audit_memori_korup_dan_dashboard_aman()
     print("ok")

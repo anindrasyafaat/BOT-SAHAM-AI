@@ -4,8 +4,8 @@ Notifications Routes untuk Trading Command Center
 
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, model_validator
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field, model_validator
 
 from notifications.manager import NotificationManager
 
@@ -22,7 +22,7 @@ class NotificationSettings(BaseModel):
 
 
 class PriceAlert(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=1, max_length=20)
     alert_type: Literal["above", "below", "percent_change"]
     target_price: Optional[float] = None
     percent_change: Optional[float] = None
@@ -82,7 +82,10 @@ async def send_test_notification(body: TestNotification):
 
 
 @router.post("/price-alerts")
-async def create_price_alert(alert: PriceAlert):
+async def create_price_alert(alert: PriceAlert, request: Request):
+    mdm = getattr(request.app.state, "market_data_manager", None)
+    if mdm and alert.symbol.upper() not in mdm.market_type_of:
+        raise HTTPException(status_code=400, detail=f"Simbol {alert.symbol} tidak dipantau")
     data = nm.add_alert(alert.symbol, alert.alert_type, alert.target_price, alert.percent_change)
     return {"status": "success", "message": f"Price alert dibuat untuk {data['symbol']}", "data": data}
 

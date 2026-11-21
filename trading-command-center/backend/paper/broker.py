@@ -3,6 +3,7 @@ Paper broker: eksekusi beli/jual dengan harga pasar terakhir, fee, kas, P&L, kur
 dan auto-exit stop loss / take profit. Semua nilai agregat dalam IDR.
 """
 
+import asyncio
 import math
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
@@ -17,6 +18,8 @@ from utils.logger import setup_logging
 
 logger = setup_logging()
 IDX_LOT = 100
+# Satu proses, satu buku kas: cek kas -> tulis transaksi harus atomik terhadap order lain yang bersamaan.
+_book_lock = asyncio.Lock()
 
 
 class BrokerError(ValueError):
@@ -44,14 +47,28 @@ async def _all_trades(session: AsyncSession) -> List[Trade]:
     return list((await session.execute(select(Trade).order_by(Trade.executed_at, Trade.id))).scalars())
 
 
-async def buy(session: AsyncSession, mdm, symbol: str, quantity: float, *, stop_loss=None,
-              take_profit=None, signal_id=None, reason="manual") -> Trade:
+async def buy(session: AsyncSession, mdm, symbol: str, quantity: float, **kw) -> Trade:
+    async with _book_lock:
+        return await _buy(session, mdm, symbol, quantity, **kw)
+
+
+async def sell(session: AsyncSession, mdm, symbol: str, quantity: Optional[float] = None, **kw) -> Trade:
+    async with _book_lock:
+        return await _sell(session, mdm, symbol, quantity, **kw)
+
+
+async def _buy(session: AsyncSession, mdm, symbol: str, quantity: float, *, stop_loss=None,
+               take_profit=None, signal_id=None, reason="manual") -> Trade:
     symbol = symbol.upper()
     if quantity <= 0:
         raise BrokerError("Jumlah harus > 0")
     if symbol.endswith(".JK") and quantity % IDX_LOT:
         raise BrokerError(f"Saham IDX harus kelipatan {IDX_LOT} lembar (1 lot)")
     price, fx = _price_and_fx(mdm, symbol)
+    if stop_loss is not None and stop_loss >= price:
+        raise BrokerError(f"Stop loss harus di bawah harga sekarang ({price:.4g})")
+    if take_profit is not None and take_profit <= price:
+        raise BrokerError(f"Take profit harus di atas harga sekarang ({price:.4g})")
     value = quantity * price * fx
     fee = value * settings.buy_fee
     cash = cash_from_trades(await _all_trades(session))
@@ -78,7 +95,7 @@ async def buy(session: AsyncSession, mdm, symbol: str, quantity: float, *, stop_
     return trade
 
 
-async def sell(session: AsyncSession, mdm, symbol: str, quantity: Optional[float] = None, *, reason="manual") -> Trade:
+async def _sell(session: AsyncSession, mdm, symbol: str, quantity: Optional[float] = None, *, reason="manual") -> Trade:
     symbol = symbol.upper()
     pos = (await session.execute(select(Position).where(Position.symbol == symbol))).scalar_one_or_none()
     if pos is None:

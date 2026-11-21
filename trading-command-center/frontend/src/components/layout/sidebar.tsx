@@ -10,7 +10,8 @@ import {
   Settings,
   Activity,
   BarChart3,
-  Brain
+  Brain,
+  Sparkles
 } from 'lucide-react'
 
 const sidebarItems = [
@@ -31,6 +32,12 @@ const sidebarItems = [
     icon: Brain,
     href: '/brain',
     description: 'Strategi yang belajar sendiri'
+  },
+  {
+    title: 'Generate',
+    icon: Sparkles,
+    href: '/generate',
+    description: 'Kerangka berpikir & alternatif'
   },
   {
     title: 'Portfolio',

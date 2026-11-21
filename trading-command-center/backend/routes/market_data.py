@@ -36,11 +36,11 @@ async def list_supported_symbols():
 
 
 @router.get("/realtime/{symbol}")
-async def get_realtime_data(symbol: str):
+async def get_realtime_data(symbol: str, request: Request):
     """Get real-time market data untuk symbol"""
     try:
         # Get dari market data manager
-        from main import market_data_manager
+        market_data_manager = getattr(request.app.state, "market_data_manager", None)
         
         if not market_data_manager:
             raise HTTPException(status_code=503, detail="Market data manager not available")
@@ -65,10 +65,10 @@ async def get_realtime_data(symbol: str):
 
 
 @router.get("/realtime")
-async def get_all_realtime_data():
+async def get_all_realtime_data(request: Request):
     """Get semua real-time market data"""
     try:
-        from main import market_data_manager
+        market_data_manager = getattr(request.app.state, "market_data_manager", None)
         
         if not market_data_manager:
             raise HTTPException(status_code=503, detail="Market data manager not available")
@@ -89,13 +89,14 @@ async def get_all_realtime_data():
 
 @router.get("/historical/{symbol}")
 async def get_historical_data(
+    request: Request,
     symbol: str,
     days: int = Query(default=30, ge=1, le=365),
     session: AsyncSession = Depends(get_db_session)
 ):
     """Get historical market data untuk symbol"""
     try:
-        from main import market_data_manager
+        market_data_manager = getattr(request.app.state, "market_data_manager", None)
         
         if not market_data_manager:
             raise HTTPException(status_code=503, detail="Market data manager not available")
@@ -195,11 +196,12 @@ async def get_sector_performance():
 
 @router.get("/heatmap")
 async def get_market_heatmap(
+    request: Request,
     market_type: str = Query(default="all", pattern="^(all|indonesia|us|crypto)$")
 ):
     """Get market heatmap data"""
     try:
-        from main import market_data_manager
+        market_data_manager = getattr(request.app.state, "market_data_manager", None)
         
         if not market_data_manager:
             raise HTTPException(status_code=503, detail="Market data manager not available")
@@ -248,12 +250,13 @@ async def get_market_heatmap(
 
 @router.get("/top-movers")
 async def get_top_movers(
+    request: Request,
     limit: int = Query(default=10, ge=1, le=50),
     market_type: str = Query(default="all", pattern="^(all|indonesia|us|crypto)$")
 ):
     """Get top gainers dan losers"""
     try:
-        from main import market_data_manager
+        market_data_manager = getattr(request.app.state, "market_data_manager", None)
         
         if not market_data_manager:
             raise HTTPException(status_code=503, detail="Market data manager not available")

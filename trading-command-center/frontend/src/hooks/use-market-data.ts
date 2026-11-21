@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from 'react-query'
 import { useWebSocketContext } from './use-websocket'
 import { useEffect, useState } from 'react'
+import { apiFetch } from './use-api'
 
 export interface MarketData {
   symbol: string
@@ -47,7 +48,7 @@ export function useMarketData(symbol?: string) {
   const { data: marketData, isLoading, error } = useQuery(
     ['marketData', symbol],
     async () => {
-      const response = await fetch(
+      const response = await apiFetch(
         symbol ? `/api/market/realtime/${symbol}` : '/api/market/realtime'
       )
       if (!response.ok) throw new Error('Failed to fetch market data')
@@ -96,7 +97,7 @@ export function useMarketSummary() {
   const { data, isLoading, error } = useQuery(
     'marketSummary',
     async () => {
-      const response = await fetch('/api/market/market-summary')
+      const response = await apiFetch('/api/market/market-summary')
       if (!response.ok) throw new Error('Failed to fetch market summary')
       return response.json()
     },
@@ -117,7 +118,7 @@ export function useTopMovers(limit: number = 10, marketType: string = 'all') {
   const { data, isLoading, error } = useQuery(
     ['topMovers', limit, marketType],
     async () => {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/market/top-movers?limit=${limit}&market_type=${marketType}`
       )
       if (!response.ok) throw new Error('Failed to fetch top movers')
@@ -140,7 +141,7 @@ export function useMarketHeatmap(marketType: string = 'all') {
   const { data, isLoading, error } = useQuery(
     ['heatmap', marketType],
     async () => {
-      const response = await fetch(`/api/market/heatmap?market_type=${marketType}`)
+      const response = await apiFetch(`/api/market/heatmap?market_type=${marketType}`)
       if (!response.ok) throw new Error('Failed to fetch heatmap')
       return response.json()
     },
@@ -161,7 +162,7 @@ export function useHistoricalData(symbol: string, days: number = 30) {
   const { data, isLoading, error } = useQuery(
     ['historical', symbol, days],
     async () => {
-      const response = await fetch(`/api/market/historical/${symbol}?days=${days}`)
+      const response = await apiFetch(`/api/market/historical/${symbol}?days=${days}`)
       if (!response.ok) throw new Error('Failed to fetch historical data')
       return response.json()
     },
@@ -182,7 +183,7 @@ export function useEconomicCalendar() {
   const { data, isLoading, error } = useQuery(
     'economicCalendar',
     async () => {
-      const response = await fetch('/api/market/economic-calendar')
+      const response = await apiFetch('/api/market/economic-calendar')
       if (!response.ok) throw new Error('Failed to fetch economic calendar')
       return response.json()
     },
@@ -203,7 +204,7 @@ export function useFearGreedIndex() {
   const { data, isLoading, error } = useQuery(
     'fearGreedIndex',
     async () => {
-      const response = await fetch('/api/market/fear-greed-index')
+      const response = await apiFetch('/api/market/fear-greed-index')
       if (!response.ok) throw new Error('Failed to fetch Fear & Greed Index')
       return response.json()
     },
