@@ -30,5 +30,22 @@ node plugins/hemat-token/test/run.js           # self-check hook + audit
 node plugins/hemat-token/scripts/token-audit.js # audit sesi terbaru
 ```
 
-## Jujur soal angka "90%"
+## Hasil uji A/B (headless Claude, 21 November 2026)
+Tugas: perbaiki bug off-by-one yang ditanam di file 8.400 baris (total 19.000 baris), lalu jalankan test. Setiap arm dijalankan 2x di fixture baru.
+
+| Arm | Test | Biaya run 1 / run 2 | Rata-rata | vs baseline |
+|---|---|---|---|---|
+| A: tanpa plugin | PASS, PASS | $0,370 / $0,355 | $0,363 | — |
+| B: + hemat-token | PASS, PASS | $0,324 / $0,325 | $0,325 | −10% |
+| C: + hemat-token + tanpa MCP/skill lain | PASS, PASS | $0,467 (cache dingin) / $0,188 (cache hangat) | — | −48% saat cache hangat |
+
+Temuan:
+- Kualitas tetap terjaga: semua 6 run lolos test.
+- Sekitar 33 ribu token "overhead tetap" (system prompt, tool, plugin lain) dibaca ulang **setiap giliran**. Ini sumber biaya terbesar, bukan file yang dibaca.
+- Penjaga Read tidak terpicu di tugas ini karena model sudah memakai grep + baca sebagian. Penjaga ini menyelamatkan kasus terburuk (baca file besar utuh), bukan kasus rata-rata.
+- Ulangi uji: `bench/run-arm.sh A` vs `bench/run-arm.sh B --plugin-dir plugins/hemat-token`, lalu `node bench/summ.js bench/A bench/B`. Ini memakai kuota API sungguhan.
+
+## Jujur soal angka "90%" dan "95%"
+Cache dibaca dengan harga 0,1x, jadi penghematan maksimum dari caching adalah **90% untuk input**. Output tidak bisa di-cache. Akibatnya "hemat 95% dari biaya total" tidak mungkin dicapai lewat plugin mana pun dibanding baseline yang sudah memakai cache (Claude Code selalu memakai cache). Angka 95% hanya muncul kalau dibandingkan dengan pola boros, misalnya membaca file besar utuh: diukur di fixture ini, Read 2.000 baris ≈ 10.900 token vs grep + 16 baris ≈ 130 token (hemat 99% untuk langkah itu).
+
 Penghematan 85–90% bisa dicapai untuk **token input** di sesi panjang, karena hampir semua konteks dibaca dari cache. Total biaya berbobot (termasuk output dan penulisan cache) biasanya hemat 70–85%. Angka pastinya tergantung pola kerja, jadi ukur dengan `audit-token`, jangan cuma percaya klaim.
