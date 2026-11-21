@@ -1,0 +1,16 @@
+{
+  "name": "bot-saham-ai",
+  "owner": {
+    "name": "anindrasyafaat"
+  },
+  "plugins": [
+    {
+      "name": "hemat-token",
+      "source": "./plugins/hemat-token",
+      "description": "Hemat token: aturan konteks ketat, penjaga Read file besar, audit token + quality gate."
+    }
+  ],
+  "metadata": {
+    "description": "Plugin Claude Code dari BOT-SAHAM-AI"
+  }
+}
